@@ -2,8 +2,12 @@ package ttsserver_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -12,6 +16,7 @@ import (
 	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
 	"github.com/the-algovn/tts-service/internal/backend"
 	"github.com/the-algovn/tts-service/internal/cache"
+	"github.com/the-algovn/tts-service/internal/catalog"
 	"github.com/the-algovn/tts-service/internal/ttsserver"
 )
 
@@ -24,6 +29,30 @@ type counting struct {
 func (c *counting) Synthesize(ctx context.Context, text, voice string, rate float64) ([]byte, string, error) {
 	c.calls++
 	return c.inner.Synthesize(ctx, text, voice, rate)
+}
+
+// failingGetStore always fails reads; writes succeed. It proves a broken
+// cache degrades rather than blocks speech.
+type failingGetStore struct{}
+
+func (failingGetStore) Get(_ context.Context, _ string) ([]byte, bool, error) {
+	return nil, false, errors.New("boom")
+}
+
+func (failingGetStore) Put(_ context.Context, _ string, _ []byte) error { return nil }
+
+// failingPutStore reads normally (via an in-memory store) but always fails
+// writes. It proves a cache write failure must not corrupt the response.
+type failingPutStore struct{ inner cache.Store }
+
+func newFailingPutStore() *failingPutStore { return &failingPutStore{inner: cache.NewMemory()} }
+
+func (f *failingPutStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	return f.inner.Get(ctx, key)
+}
+
+func (f *failingPutStore) Put(_ context.Context, _ string, _ []byte) error {
+	return errors.New("put boom")
 }
 
 func newServer(b backend.Backend) *ttsserver.Server {
@@ -86,4 +115,119 @@ func TestSynthesizeSecondCallHitsCache(t *testing.T) {
 	require.True(t, second.GetCacheHit())
 	require.Zero(t, second.GetCostUsd(), "a cache hit costs nothing")
 	require.Equal(t, first.GetAudio(), second.GetAudio())
+}
+
+// A broken cache is a degraded cache, not an outage: a Get error must still
+// produce real, correctly priced audio.
+func TestSynthesizeSurvivesCacheReadFailure(t *testing.T) {
+	s := ttsserver.New(ttsserver.Deps{
+		Logger:   slog.Default(),
+		Backends: map[string]backend.Backend{"google": backend.Fake{}, "fake": backend.Fake{}},
+		Cache:    failingGetStore{},
+	})
+
+	resp, err := s.Synthesize(context.Background(), &ttsv1.SynthesizeRequest{
+		// 8 runes, wavenet tier at $4/1M chars.
+		Text: "xin chào", VoiceId: "google:vi-VN-Wavenet-B", Format: ttsv1.AudioFormat_AUDIO_FORMAT_WAV,
+	})
+
+	require.NoError(t, err)
+	require.False(t, resp.GetCacheHit())
+	require.NotEmpty(t, resp.GetAudio())
+	require.InDelta(t, 4.0/1e6*8, resp.GetCostUsd(), 1e-12)
+}
+
+// A cache write failure must not corrupt the reply that is about to be
+// returned to the caller.
+func TestSynthesizeSurvivesCacheWriteFailure(t *testing.T) {
+	s := ttsserver.New(ttsserver.Deps{
+		Logger:   slog.Default(),
+		Backends: map[string]backend.Backend{"google": backend.Fake{}, "fake": backend.Fake{}},
+		Cache:    newFailingPutStore(),
+	})
+
+	resp, err := s.Synthesize(context.Background(), &ttsv1.SynthesizeRequest{
+		Text: "xin chào", VoiceId: "google:vi-VN-Wavenet-B", Format: ttsv1.AudioFormat_AUDIO_FORMAT_WAV,
+	})
+
+	require.NoError(t, err)
+	require.False(t, resp.GetCacheHit())
+	require.NotEmpty(t, resp.GetAudio())
+	require.InDelta(t, 4.0/1e6*8, resp.GetCostUsd(), 1e-12)
+}
+
+// A nil Google source (no API key configured) must not panic, and must
+// return whatever VieNeu supplies.
+func TestListVoicesNilGoogleReturnsVieNeuOnly(t *testing.T) {
+	vieneu := []catalog.Voice{
+		{ID: "vieneu:test-voice", Label: "Test Voice", Provider: "vieneu", Tier: "standard", Gender: "FEMALE"},
+	}
+	s := ttsserver.New(ttsserver.Deps{Logger: slog.Default(), VieNeuVoices: vieneu})
+
+	resp, err := s.ListVoices(context.Background(), &ttsv1.ListVoicesRequest{})
+
+	require.NoError(t, err)
+	require.Len(t, resp.GetVoices(), 1)
+	require.Equal(t, "vieneu:test-voice", resp.GetVoices()[0].GetId())
+}
+
+// A voice list is a picker, not a dependency of speech: a Google catalog
+// fetch failure must not fail the RPC, only omit Google's voices.
+func TestListVoicesToleratesGoogleFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	s := ttsserver.New(ttsserver.Deps{
+		Logger: slog.Default(),
+		Google: &catalog.GoogleSource{APIKey: "k", BaseURL: srv.URL, TTL: time.Minute},
+	})
+
+	resp, err := s.ListVoices(context.Background(), &ttsv1.ListVoicesRequest{})
+
+	require.NoError(t, err)
+	require.Empty(t, resp.GetVoices())
+}
+
+const listVoicesFixtureJSON = `{"voices":[
+  {"languageCodes":["vi-VN"],"name":"vi-VN-Wavenet-B","ssmlGender":"MALE"}
+]}`
+
+// The merged list must carry every field through for both a fetched Google
+// voice and a directly injected VieNeu voice.
+func TestListVoicesMergesGoogleAndVieNeu(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(listVoicesFixtureJSON))
+	}))
+	defer srv.Close()
+
+	vieneu := []catalog.Voice{
+		{ID: "vieneu:custom-1", Label: "Custom One", Provider: "vieneu", Tier: "standard", Gender: "FEMALE", FreeTierChars: 0},
+	}
+	s := ttsserver.New(ttsserver.Deps{
+		Logger:       slog.Default(),
+		Google:       &catalog.GoogleSource{APIKey: "k", BaseURL: srv.URL, TTL: time.Minute},
+		VieNeuVoices: vieneu,
+	})
+
+	resp, err := s.ListVoices(context.Background(), &ttsv1.ListVoicesRequest{})
+	require.NoError(t, err)
+	require.Len(t, resp.GetVoices(), 2)
+
+	g := resp.GetVoices()[0]
+	require.Equal(t, "google:vi-VN-Wavenet-B", g.GetId())
+	require.Equal(t, "vi-VN-Wavenet-B", g.GetLabel())
+	require.Equal(t, "google", g.GetProvider())
+	require.Equal(t, "wavenet", g.GetTier())
+	require.Equal(t, "MALE", g.GetGender())
+	require.EqualValues(t, 4_000_000, g.GetFreeTierCharsPerMonth())
+
+	v := resp.GetVoices()[1]
+	require.Equal(t, "vieneu:custom-1", v.GetId())
+	require.Equal(t, "Custom One", v.GetLabel())
+	require.Equal(t, "vieneu", v.GetProvider())
+	require.Equal(t, "standard", v.GetTier())
+	require.Equal(t, "FEMALE", v.GetGender())
+	require.EqualValues(t, 0, v.GetFreeTierCharsPerMonth())
 }
