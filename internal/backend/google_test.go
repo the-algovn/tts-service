@@ -16,7 +16,10 @@ import (
 
 func TestGoogleSynthesizeSendsVietnameseAndDecodesAudio(t *testing.T) {
 	var body map[string]any
+	var apiKeyHeader, rawQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiKeyHeader = r.Header.Get("x-goog-api-key")
+		rawQuery = r.URL.RawQuery
 		raw, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(raw, &body)
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -32,6 +35,11 @@ func TestGoogleSynthesizeSendsVietnameseAndDecodesAudio(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("ID3-audio"), data)
 	require.Equal(t, "mp3", ext)
+
+	// The API key must travel in a header, never the URL: transport errors are
+	// *url.Error, which prints the full URL, and that gets logged on failure.
+	require.Equal(t, "k", apiKeyHeader, "api key must travel in the x-goog-api-key header")
+	require.Empty(t, rawQuery, "api key must never reach the URL query string")
 
 	voice := body["voice"].(map[string]any)
 	require.Equal(t, "vi-VN", voice["languageCode"])
