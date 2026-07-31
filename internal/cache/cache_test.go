@@ -53,3 +53,29 @@ func TestMemoryStoreRoundTrips(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []byte("audio"), got)
 }
+
+// Memory is the test double for S3, and S3 never aliases -- it decodes fresh
+// bytes off the network on every Get. If Memory aliased caller slices, a test
+// could pass against the double while the same code corrupted a shared
+// buffer against real MinIO. So neither Put nor a returned Get result may
+// share backing storage with the entry.
+func TestMemoryStoreDoesNotAliasCallerSlices(t *testing.T) {
+	ctx := context.Background()
+	m := cache.NewMemory()
+
+	original := []byte("audio")
+	require.NoError(t, m.Put(ctx, "k", original))
+	original[0] = 'X' // mutate the slice after Put
+
+	got, ok, err := m.Get(ctx, "k")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []byte("audio"), got, "Put must copy, not alias the caller's slice")
+
+	got[0] = 'Y' // mutate the slice returned by Get
+
+	got2, ok, err := m.Get(ctx, "k")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []byte("audio"), got2, "Get must copy, not alias the stored slice")
+}

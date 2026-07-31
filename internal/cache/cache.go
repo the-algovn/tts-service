@@ -40,12 +40,15 @@ func (c *Memory) Get(_ context.Context, key string) ([]byte, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v, ok := c.m[key]
-	return v, ok, nil
+	if !ok {
+		return nil, false, nil
+	}
+	return append([]byte(nil), v...), true, nil
 }
 
 func (c *Memory) Put(_ context.Context, key string, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.m[key] = data
+	c.m[key] = append([]byte(nil), data...)
 	return nil
 }
