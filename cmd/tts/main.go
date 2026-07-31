@@ -72,6 +72,10 @@ func main() {
 		logger.WarnContext(ctx, "no google tts key; google voices synthesize silence")
 	}
 
+	if u := config.Get("VIENEU_URL", ""); u != "" {
+		backends["vieneu"] = backend.NewVieNeu(u)
+	}
+
 	var store cache.Store
 	if ep := config.Get("MINIO_ENDPOINT", ""); ep != "" {
 		s3, err := cache.NewS3(cache.Config{
