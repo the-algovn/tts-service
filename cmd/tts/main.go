@@ -53,7 +53,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := grpc.NewServer(grpc.UnaryInterceptor(obs.UnaryServerInterceptor()))
+	srv := grpc.NewServer(
+		grpc.StatsHandler(obs.ServerHandler()),
+		grpc.ChainUnaryInterceptor(obs.UnaryServerInterceptor()),
+	)
 	ttsv1.RegisterTTSServiceServer(srv, ttsserver.New(ttsserver.Deps{Logger: logger}))
 	healthpb.RegisterHealthServer(srv, health.NewServer())
 	reflection.Register(srv)
