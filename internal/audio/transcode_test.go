@@ -54,3 +54,19 @@ func TestConvertIsIdentityWhenFormatsMatch(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, in, got)
 }
+
+// filepath.Join cleans ".." rather than rejecting it, so an unchecked
+// extension could otherwise escape the temp directory sandbox. These assert
+// on the specific rejection message, not just "some error" — an unvalidated
+// traversal attempt still errors out today (the OS or ffmpeg happens to
+// reject the resulting stray path), which would let a weaker assertion pass
+// without the extension actually being validated.
+func TestConvertRejectsPathTraversalInFromExt(t *testing.T) {
+	_, err := audio.Convert(context.Background(), silentWAV(), "../../../../etc/passwd", "mp3")
+	require.ErrorContains(t, err, "unsupported audio format")
+}
+
+func TestConvertRejectsPathTraversalInToExt(t *testing.T) {
+	_, err := audio.Convert(context.Background(), silentWAV(), "wav", "../../evil")
+	require.ErrorContains(t, err, "unsupported audio format")
+}
