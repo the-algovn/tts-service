@@ -20,7 +20,7 @@ var per1M = map[string]float64{
 // freeChars is the monthly free allowance per tier, in characters.
 var freeChars = map[string]int64{
 	"chirp3-hd": 1_000_000,
-	"neural2":   0,
+	"neural2":   1_000_000,
 	"wavenet":   4_000_000,
 	"standard":  4_000_000,
 }

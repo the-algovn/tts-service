@@ -39,6 +39,8 @@ func TestCostUSDIsZeroForFreeProviders(t *testing.T) {
 // subtracts it from cost.
 func TestFreeTierChars(t *testing.T) {
 	require.EqualValues(t, 4_000_000, pricing.FreeTierChars("google", "vi-VN-Wavenet-B"))
+	require.EqualValues(t, 4_000_000, pricing.FreeTierChars("google", "vi-VN-Standard-A"))
+	require.EqualValues(t, 1_000_000, pricing.FreeTierChars("google", "vi-VN-Neural2-A"))
 	require.EqualValues(t, 1_000_000, pricing.FreeTierChars("google", "vi-VN-Chirp3-HD-Aoede"))
 	require.EqualValues(t, 0, pricing.FreeTierChars("vieneu", "whatever"))
 }
