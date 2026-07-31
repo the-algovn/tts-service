@@ -83,7 +83,7 @@ confused with -- the 6 voices in the CC-BY-NC base `voices.json`
   the whole tree into a new overlay layer and double the image size, since
   the root-owned layer underneath still exists; learned this the
   expensive way -- see git history).
-- **Request body bound.** `SynthesizeRequest.text` has `max_length=5000`
+- **Request body bound.** `SynthesizeRequest.text` has `max_length=2000`
   (matching the Go caller's own cap in `internal/ttsserver/server.go`).
   This endpoint is reachable directly inside the cluster and must not rely
   on a well-behaved caller: an oversized `text` now gets a `422` from

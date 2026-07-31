@@ -30,11 +30,12 @@ _lock = threading.Lock()  # the ONNX engine is not proven safe under concurrent 
 
 
 class SynthesizeRequest(BaseModel):
-    # max_length matches the Go caller's own cap (internal/ttsserver/server.go)
-    # -- this endpoint is reachable directly inside the cluster and must not
-    # depend on a well-behaved caller to avoid an oversized synthesis request
-    # serializing every other request behind the global lock below.
-    text: str = Field(..., max_length=5000)
+    # max_length matches the Go caller's own cap (internal/ttsserver/server.go),
+    # itself derived from the default 4MB gRPC message limit -- this endpoint
+    # is reachable directly inside the cluster and must not depend on a
+    # well-behaved caller to avoid an oversized synthesis request serializing
+    # every other request behind the global lock below.
+    text: str = Field(..., max_length=2000)
     voice: Optional[str] = None
     speed: float = 1.0
 
