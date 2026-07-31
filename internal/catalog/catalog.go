@@ -26,3 +26,7 @@ func Resolve(voiceID string) (provider, name string) {
 	}
 	return p, n
 }
+
+// VieNeuVoices lists the self-hosted voices. Populated in Task 9 once the model
+// is pulled and its voice names are known.
+func VieNeuVoices() []Voice { return nil }

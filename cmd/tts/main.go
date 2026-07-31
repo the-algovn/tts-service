@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -17,6 +18,9 @@ import (
 
 	"github.com/the-algovn/gopkg/obs"
 	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
+	"github.com/the-algovn/tts-service/internal/backend"
+	"github.com/the-algovn/tts-service/internal/cache"
+	"github.com/the-algovn/tts-service/internal/catalog"
 	"github.com/the-algovn/tts-service/internal/config"
 	"github.com/the-algovn/tts-service/internal/ttsserver"
 )
@@ -57,7 +61,40 @@ func main() {
 		grpc.StatsHandler(obs.ServerHandler()),
 		grpc.ChainUnaryInterceptor(obs.UnaryServerInterceptor()),
 	)
-	ttsv1.RegisterTTSServiceServer(srv, ttsserver.New(ttsserver.Deps{Logger: logger}))
+	backends := map[string]backend.Backend{"fake": backend.Fake{}}
+	var googleSrc *catalog.GoogleSource
+	if k := config.Get("GOOGLE_TTS_API_KEY", ""); k != "" {
+		backends["google"] = backend.NewGoogle(k)
+		googleSrc = &catalog.GoogleSource{APIKey: k, TTL: time.Hour}
+	} else {
+		// Keyless dev: bare and google-namespaced ids still resolve, to silence.
+		backends["google"] = backend.Fake{}
+		logger.WarnContext(ctx, "no google tts key; google voices synthesize silence")
+	}
+
+	var store cache.Store
+	if ep := config.Get("MINIO_ENDPOINT", ""); ep != "" {
+		s3, err := cache.NewS3(cache.Config{
+			Endpoint:  ep,
+			AccessKey: config.Get("MINIO_ACCESS_KEY", ""),
+			SecretKey: config.Get("MINIO_SECRET_KEY", ""),
+			Bucket:    config.Get("MINIO_BUCKET", "tts-cache"),
+			UseSSL:    config.Get("MINIO_USE_SSL", "false") == "true",
+		})
+		if err != nil {
+			logger.ErrorContext(ctx, "minio setup failed", "err", err)
+			os.Exit(1)
+		}
+		store = s3
+	}
+
+	ttsv1.RegisterTTSServiceServer(srv, ttsserver.New(ttsserver.Deps{
+		Logger:       logger,
+		Backends:     backends,
+		Cache:        store,
+		Google:       googleSrc,
+		VieNeuVoices: catalog.VieNeuVoices(),
+	}))
 	healthpb.RegisterHealthServer(srv, health.NewServer())
 	reflection.Register(srv)
 
