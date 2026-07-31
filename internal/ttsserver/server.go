@@ -30,6 +30,11 @@ type Deps struct {
 	Cache        cache.Store
 	Google       *catalog.GoogleSource
 	VieNeuVoices []catalog.Voice
+	// GoogleIsFake is true when main.go substituted backend.Fake{} under the
+	// "google" key because GOOGLE_TTS_API_KEY is absent (keyless dev). It lets
+	// Synthesize report the backend that actually served the request instead
+	// of the one the caller asked for.
+	GoogleIsFake bool
 }
 
 type Server struct {
@@ -70,12 +75,20 @@ func (s *Server) Synthesize(ctx context.Context, req *ttsv1.SynthesizeRequest) (
 		return nil, status.Errorf(codes.InvalidArgument, "unknown provider %q", provider)
 	}
 
+	// A keyless box substitutes backend.Fake{} under the "google" key (see
+	// GoogleIsFake); report the backend that actually served the request, or
+	// a keyless deploy would charge the Google list price for silence.
+	effectiveProvider := provider
+	if provider == "google" && s.deps.GoogleIsFake {
+		effectiveProvider = "fake"
+	}
+
 	wantExt := extOf(req.GetFormat())
 	rate := req.GetSpeakingRate()
 	if rate == 0 {
 		rate = 1.0
 	}
-	key := cache.Key(provider, name, rate, wantExt, req.GetText())
+	key := cache.Key(effectiveProvider, name, rate, wantExt, req.GetText())
 
 	if s.deps.Cache != nil {
 		if data, hit, err := s.deps.Cache.Get(ctx, key); err != nil {
@@ -84,7 +97,7 @@ func (s *Server) Synthesize(ctx context.Context, req *ttsv1.SynthesizeRequest) (
 		} else if hit {
 			return &ttsv1.SynthesizeResponse{
 				Audio: data, Format: formatOf(wantExt), VoiceId: req.GetVoiceId(),
-				Provider: provider, CostUsd: 0, CacheHit: true,
+				Provider: effectiveProvider, CostUsd: 0, CacheHit: true,
 			}, nil
 		}
 	}
@@ -108,14 +121,14 @@ func (s *Server) Synthesize(ctx context.Context, req *ttsv1.SynthesizeRequest) (
 		}
 	}
 
-	cost := pricing.CostUSD(provider, name, chars)
+	cost := pricing.CostUSD(effectiveProvider, name, chars)
 	s.deps.Logger.InfoContext(ctx, "synthesized",
-		"provider", provider, "voice", name, "chars", chars,
+		"provider", effectiveProvider, "voice", name, "chars", chars,
 		"cost_usd", cost, "label", req.GetLabel())
 
 	return &ttsv1.SynthesizeResponse{
 		Audio: data, Format: formatOf(wantExt), VoiceId: req.GetVoiceId(),
-		Provider: provider, CostUsd: cost, CacheHit: false,
+		Provider: effectiveProvider, CostUsd: cost, CacheHit: false,
 	}, nil
 }
 

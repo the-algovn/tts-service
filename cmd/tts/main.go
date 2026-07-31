@@ -63,12 +63,16 @@ func main() {
 	)
 	backends := map[string]backend.Backend{"fake": backend.Fake{}}
 	var googleSrc *catalog.GoogleSource
+	googleIsFake := false
 	if k := config.Get("GOOGLE_TTS_API_KEY", ""); k != "" {
 		backends["google"] = backend.NewGoogle(k)
 		googleSrc = &catalog.GoogleSource{APIKey: k, TTL: time.Hour}
 	} else {
-		// Keyless dev: bare and google-namespaced ids still resolve, to silence.
+		// Keyless dev: bare and google-namespaced ids still resolve, to
+		// silence. googleIsFake tells the server so it reports the actual
+		// (fake) provider instead of "google".
 		backends["google"] = backend.Fake{}
+		googleIsFake = true
 		logger.WarnContext(ctx, "no google tts key; google voices synthesize silence")
 	}
 
@@ -98,6 +102,7 @@ func main() {
 		Cache:        store,
 		Google:       googleSrc,
 		VieNeuVoices: catalog.VieNeuVoices(),
+		GoogleIsFake: googleIsFake,
 	}))
 	healthpb.RegisterHealthServer(srv, health.NewServer())
 	reflection.Register(srv)

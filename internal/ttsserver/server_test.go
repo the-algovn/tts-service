@@ -88,6 +88,27 @@ func TestSynthesizePricesAtListRate(t *testing.T) {
 	require.False(t, resp.GetCacheHit())
 }
 
+// A keyless deploy substitutes backend.Fake{} under the "google" key
+// (cmd/tts/main.go, GoogleIsFake). The response must report the backend that
+// actually served the request -- "fake", at zero cost -- not "google" at the
+// Google list price for a second of silence.
+func TestSynthesizeReportsFakeProviderWhenGoogleIsSubstituted(t *testing.T) {
+	s := ttsserver.New(ttsserver.Deps{
+		Logger:       slog.Default(),
+		Backends:     map[string]backend.Backend{"google": backend.Fake{}, "fake": backend.Fake{}},
+		Cache:        cache.NewMemory(),
+		GoogleIsFake: true,
+	})
+
+	resp, err := s.Synthesize(context.Background(), &ttsv1.SynthesizeRequest{
+		Text: "0123456789", VoiceId: "google:vi-VN-Wavenet-B", Format: ttsv1.AudioFormat_AUDIO_FORMAT_WAV,
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, "fake", resp.GetProvider())
+	require.Zero(t, resp.GetCostUsd())
+}
+
 // A bare id must keep working: ids persisted before this service existed have
 // no provider prefix.
 func TestSynthesizeAcceptsBareVoiceID(t *testing.T) {
