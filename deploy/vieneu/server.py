@@ -18,7 +18,7 @@ import soundfile as sf
 import soxr
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("vieneu.server")
@@ -30,7 +30,11 @@ _lock = threading.Lock()  # the ONNX engine is not proven safe under concurrent 
 
 
 class SynthesizeRequest(BaseModel):
-    text: str
+    # max_length matches the Go caller's own cap (internal/ttsserver/server.go)
+    # -- this endpoint is reachable directly inside the cluster and must not
+    # depend on a well-behaved caller to avoid an oversized synthesis request
+    # serializing every other request behind the global lock below.
+    text: str = Field(..., max_length=5000)
     voice: Optional[str] = None
     speed: float = 1.0
 

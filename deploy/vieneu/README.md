@@ -11,15 +11,29 @@ contract fixed by `internal/backend/vieneu.go`:
 
 - SDK: [`vieneu`](https://pypi.org/project/vieneu/) `3.2.3` (PyPI), Apache-2.0.
 - Model: `pnnbao-ump/VieNeu-TTS-v3-Turbo`, Apache-2.0, tags `vi`+`en`.
-  Revision baked into this image: **`75ff82a72f54d55ed389e1eeb12041d3c4bac7d4`**
-  (the `vieneu` SDK does not expose a `revision=` pin -- it always resolves
-  `main`; this is the commit `main` resolved to at build time, confirmed by
-  the HF Hub API and by the snapshot directory actually cached in the image).
-- Secondary dependency: `OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX`
-  (the MOSS audio codec used by the ONNX engine), Apache-2.0, resolved
-  commit `ceff0d0749bfb3fa2d61149794ec6feef0d1e1ae`.
+  Revision pinned and enforced: **`75ff82a72f54d55ed389e1eeb12041d3c4bac7d4`**.
+- Secondary (transitive) dependency: `OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX`
+  (the MOSS audio codec used by the ONNX engine, fetched automatically by
+  `vieneu`'s CPU engine alongside the backbone), Apache-2.0, revision pinned
+  and enforced: **`ceff0d0749bfb3fa2d61149794ec6feef0d1e1ae`**.
 - Precision: **int8** backbone (the SDK's CPU default -- `onnx_int8`
   subfolder), not fp32.
+
+**Pin enforcement.** The `vieneu` SDK never exposes a `revision=` -- its own
+fetch calls always resolve whatever `main` currently points to, for both
+repos above. Since the licence review here is against a specific commit,
+letting a future rebuild silently follow `main` would be undetected licence
+drift, not just version drift. `deploy/vieneu/pin_model.py` runs at build
+time, before anything else touches the network, and:
+1. asks the Hub API what `main` resolves to for both repos right now;
+2. **fails the build** (non-zero exit) if either doesn't match the pinned
+   commit above;
+3. only then calls `snapshot_download(..., revision=<pinned sha>,
+   allow_patterns=[...])` for both (same file subset `vieneu` would fetch
+   on its own, so the image doesn't grow), followed by one normal
+   `Vieneu()` call, which reuses that same cache (content-addressed by
+   commit) and populates `refs/main` so the runtime's offline, unpinned
+   lookups resolve to the pinned bytes.
 
 **Non-commercial artifact avoided.** The pip package also bundles an older,
 6-voice preset file (`vieneu/assets/voices.json`) for the base 0.3B/GGUF
@@ -59,6 +73,24 @@ no reference clip required. They are distinct from -- and must not be
 confused with -- the 6 voices in the CC-BY-NC base `voices.json`
 (`Vinh`/`Binh`/`Tuyen`/`Doan`/`Ly`/`Ngoc`).
 
+## Runtime hardening
+
+- **Non-root.** The container runs as `app` (fixed UID `10001`, matching
+  the convention in `tts-service/Dockerfile` and `radio-service/Dockerfile`),
+  not root. `/models/hf-cache` is owned by `app` from before it's populated
+  -- the model is downloaded *as* `app` during the build, not chowned after
+  the fact (a `chown -R` over an already-populated ~300MB tree would copy
+  the whole tree into a new overlay layer and double the image size, since
+  the root-owned layer underneath still exists; learned this the
+  expensive way -- see git history).
+- **Request body bound.** `SynthesizeRequest.text` has `max_length=5000`
+  (matching the Go caller's own cap in `internal/ttsserver/server.go`).
+  This endpoint is reachable directly inside the cluster and must not rely
+  on a well-behaved caller: an oversized `text` now gets a `422` from
+  pydantic validation before it ever reaches `infer()`, rather than
+  serializing every other request behind the global lock while one huge
+  synthesis runs.
+
 ## Speed handling
 
 The `vieneu` SDK's `infer()` has no rate/speed parameter. `speed` is
@@ -74,14 +106,14 @@ Pitch shifts along with speed -- this is not a pitch-preserving time-stretch.
 podman build -t vieneu-tts:dev -f deploy/vieneu/Dockerfile deploy/vieneu/
 ```
 
-Model download happens **only at build time** (`HF_HOME=/models/hf-cache`
-populated by one `Vieneu()` call), then `HF_HUB_OFFLINE=1` is set for
-runtime -- the pod does no network I/O and needs no persistent volume.
-Only the `onnx_int8` subfolder of the 7.6GB v3-Turbo repo is fetched
-(~165MB) plus the ~90MB MOSS codec repo: **~285MB of model weights**, not
-the full repo.
+Model download happens **only at build time** (`HF_HOME=/models/hf-cache`,
+populated by `pin_model.py` -- see "Pin enforcement" above), then
+`HF_HUB_OFFLINE=1` is set for runtime -- the pod does no network I/O and
+needs no persistent volume. Only the `onnx_int8` subfolder of the 7.6GB
+v3-Turbo repo is fetched (~165MB) plus the ~90MB MOSS codec repo: **~285MB
+of model weights**, not the full repo.
 
-- **Final image size: 895 MB** (`podman images`). Most of this is Python
+- **Final image size: 894 MB** (`podman images`). Most of this is Python
   deps, not the model: `onnxruntime` (~200MB installed) and `gradio`
   (~pandas/pillow/starlette, a *required* -- not optional -- transitive
   dependency of `vieneu==3.2.3`, pulled in even though this server never
@@ -107,7 +139,8 @@ huggingface_hub==1.26.0  gradio==6.22.0  pandas==3.0.5  pillow==12.3.0  ...
 
 ## Smoke test (2026-07-31, `linux/arm64`, Podman VM: 6 vCPU / 6GB RAM)
 
-Ran with `podman run -d -p 18080:8080 vieneu-tts:dev`, then:
+Ran with `podman run -d -p 18080:8080 vieneu-tts:dev`, confirmed
+`podman exec vieneu-smoke id` -> `uid=10001(app)` (non-root), then:
 
 ```bash
 curl -s -X POST localhost:18080/synthesize \
@@ -118,13 +151,15 @@ curl -s -X POST localhost:18080/synthesize \
 
 | Sample | Voice | Wall clock | Audio duration | RTF |
 |---|---|---|---|---|
-| `vieneu-sample.wav` | Phạm Tuyên (male, Bắc, default) | 0.607 s | 3.60-3.76 s | ~0.16-0.17 |
-| `vieneu-sample-male.wav` | Phạm Tuyên (male, Bắc) | 0.610 s | 3.92 s | ~0.16 |
-| `vieneu-sample-female.wav` | Trúc Ly (female, Bắc) | 0.600 s | 4.40 s | ~0.14 |
+| `vieneu-sample.wav` | Phạm Tuyên (male, Bắc, default) | 0.786 s | 4.08 s | ~0.19 |
+| `vieneu-sample-male.wav` | Phạm Tuyên (male, Bắc) | 0.624 s | 3.68 s | ~0.17 |
+| `vieneu-sample-female.wav` | Trúc Ly (female, Bắc) | 0.684 s | 4.48 s | ~0.15 |
 
 All three: `200 OK`, `RIFF ... WAVE ... Microsoft PCM, 16 bit, mono 48000 Hz`
-(confirmed with `file`/`ffprobe`). RTF well under 1 on CPU, consistent with
-the SDK's claimed CPU performance.
+(confirmed with `file`/`ffprobe`), synthesized **as the non-root `app`
+user**. RTF well under 1 on CPU, consistent with the SDK's claimed CPU
+performance and consistent with the pre-fix numbers (run-to-run variance,
+not a regression from running non-root).
 
 **Podman VM memory matters.** The default Podman machine on this host was
 provisioned with only 2048MB RAM, which OOM-killed the container (exit 137)
@@ -138,7 +173,20 @@ request); ~890 MB-1.2 GB after several `/synthesize` calls (`podman stats`).
 Budget at least ~1.5 GB per pod for headroom.
 
 **Error handling** verified: an unknown voice name returns `400` with a
-message listing all 14 valid ids (`"Voice 'X' not found. Available: [...]"`).
+message listing all 14 valid ids (`"Voice 'X' not found. Available: [...]"`);
+`text` over 5000 chars returns `422` from pydantic validation without
+reaching `infer()`.
+
+**Additional observation (not a regression, not one of the three fix
+items -- flagging, not fixing):** a *pathological* 5000-char request with
+no sentence punctuation (`"a" * 5000`, which passes the length check)
+triggered an `onnxruntime` allocation failure (`Fail to allocate ... size
+10895249152` -- the model's own chunker apparently didn't split it) and
+returned a clean `500` with no traceback leaked, without crashing the
+container or the process. Real DJ-length text always has punctuation the
+chunker splits on, so this is unlikely to bite in practice, but it means
+`max_length=5000` alone does not fully bound worst-case memory for
+adversarial input. Leaving as-is per scope; noting for the ledger.
 
 ## Not done here (out of scope for this build/smoke-test step)
 
