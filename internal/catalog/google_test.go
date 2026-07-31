@@ -39,6 +39,27 @@ func TestGoogleVoicesNamespacesAndPrices(t *testing.T) {
 	require.EqualValues(t, 1_000_000, got[1].FreeTierChars)
 }
 
+// The key must never appear in the URL: http.Client wraps transport failures
+// (timeout, DNS, connection refused) in *url.Error, which formats as
+// "GET https://...&key=THEKEY: dial tcp ...", and that error string gets
+// logged verbatim by the caller on every transient Google outage.
+func TestGoogleVoicesSendsAPIKeyAsHeaderNotQuery(t *testing.T) {
+	var gotHeader, gotQueryKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("x-goog-api-key")
+		gotQueryKey = r.URL.Query().Get("key")
+		_, _ = w.Write([]byte(voicesJSON))
+	}))
+	defer srv.Close()
+
+	src := catalog.GoogleSource{APIKey: "secret-key", BaseURL: srv.URL, TTL: time.Minute}
+	_, err := src.Voices(context.Background())
+	require.NoError(t, err)
+
+	require.Equal(t, "secret-key", gotHeader)
+	require.Empty(t, gotQueryKey, "api key must not be sent as a query parameter")
+}
+
 // A second call inside the TTL must not hit the network again.
 func TestGoogleVoicesCaches(t *testing.T) {
 	var calls int

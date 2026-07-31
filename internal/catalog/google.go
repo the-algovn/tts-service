@@ -33,17 +33,41 @@ func (g *GoogleSource) base() string {
 
 func (g *GoogleSource) Voices(ctx context.Context) ([]Voice, error) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-
 	if g.cached != nil && time.Since(g.fetched) < g.TTL {
-		return g.cached, nil
+		v := g.cached
+		g.mu.Unlock()
+		return v, nil
+	}
+	g.mu.Unlock()
+
+	// Fetch outside the lock: sync.Mutex isn't context-aware, so holding it
+	// across the network call would let a slow/hung Google response block
+	// every concurrent caller until the lock-holder's fetch finishes,
+	// regardless of the caller's own context deadline. Two concurrent
+	// cold-start fetches are possible here; that's fine for a low-traffic
+	// picker endpoint and not worth a singleflight dependency.
+	voices, err := g.fetch(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	url := g.base() + "/v1/voices?languageCode=vi-VN&key=" + g.APIKey
+	g.mu.Lock()
+	g.cached, g.fetched = voices, time.Now()
+	g.mu.Unlock()
+	return voices, nil
+}
+
+func (g *GoogleSource) fetch(ctx context.Context) ([]Voice, error) {
+	url := g.base() + "/v1/voices?languageCode=vi-VN"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
+	// Sent as a header, not a query param: http.Client wraps transport
+	// failures (timeout, DNS, connection refused) in *url.Error, whose
+	// Error() includes the full URL -- a query-param key would end up in
+	// logs on every transient Google outage.
+	req.Header.Set("x-goog-api-key", g.APIKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -87,7 +111,5 @@ func (g *GoogleSource) Voices(ctx context.Context) ([]Voice, error) {
 			FreeTierChars: pricing.FreeTierChars(ProviderGoogle, v.Name),
 		})
 	}
-
-	g.cached, g.fetched = voices, time.Now()
 	return voices, nil
 }
