@@ -21,7 +21,7 @@ USER app
 RUN python /tmp/pin_model.py && rm /tmp/pin_model.py
 ENV HF_HUB_OFFLINE=1
 
-COPY --chown=app:app server.py /app/server.py
+COPY --chown=app:app server.py test_server.py /app/
 WORKDIR /app
 EXPOSE 8080
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

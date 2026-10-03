@@ -7,7 +7,8 @@ Implements the HTTP contract fixed by `internal/backend/voxcpm.go`:
 POST /synthesize {"text", "ref_wav_b64", "ref_text", "description"} -> audio/wav
   clone:  ref_wav_b64 + ref_text, no description
   design: description, no ref
-GET /healthz -> 200 once the model is resident, 503 before
+GET /healthz -> 200 once the model is resident. The model loads before the
+  server accepts connections, so probes get connection-refused until then.
 ```
 
 Unused fields are sent as JSON null. Errors are non-200 with a short body

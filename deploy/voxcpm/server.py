@@ -4,7 +4,8 @@ Contract is fixed by tts-service/internal/backend/voxcpm.go:
   POST /synthesize {"text", "ref_wav_b64", "ref_text", "description"} -> audio/wav
     clone:  ref_wav_b64 + ref_text, no description
     design: description, no ref
-  GET /healthz -> 200 once the model is resident, 503 before
+  GET /healthz -> 200 once the model is resident. The model loads before the
+  server accepts connections, so probes get connection-refused until then.
 """
 import base64
 import binascii
@@ -14,6 +15,7 @@ import logging
 import os
 import tempfile
 import threading
+from contextlib import asynccontextmanager
 from collections import OrderedDict
 from typing import Optional
 
@@ -27,7 +29,6 @@ log = logging.getLogger("voxcpm.server")
 MAX_TEXT = 600
 PROMPT_CACHE_SIZE = 8
 
-app = FastAPI()
 _engine = None
 
 
@@ -83,13 +84,16 @@ class SynthesizeRequest(BaseModel):
     description: Optional[str] = None
 
 
-@app.on_event("startup")
-def load() -> None:
+@asynccontextmanager
+async def lifespan(_app):
     global _engine
-    if os.environ.get("VOXCPM_SKIP_LOAD") == "1":
-        return
-    _engine = Engine()
-    log.info("model resident, sample_rate=%d", _engine.sample_rate)
+    if os.environ.get("VOXCPM_SKIP_LOAD") != "1":
+        _engine = Engine()
+        log.info("model resident, sample_rate=%d", _engine.sample_rate)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/healthz")
@@ -123,6 +127,10 @@ def synthesize(req: SynthesizeRequest) -> Response:
             ref = base64.b64decode(req.ref_wav_b64, validate=True)
         except (binascii.Error, ValueError) as e:
             raise HTTPException(400, "ref_wav_b64 is not base64") from e
+        try:
+            sf.info(io.BytesIO(ref))
+        except Exception as e:
+            raise HTTPException(400, "ref_wav_b64 is not audio") from e
         key = hashlib.sha256(ref + b"\0" + req.ref_text.encode()).hexdigest()
         with tempfile.NamedTemporaryFile(suffix=".wav") as f:
             f.write(ref)
