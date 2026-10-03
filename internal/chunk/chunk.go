@@ -14,6 +14,7 @@ import (
 // empty; their order follows the text. Joining the chunks with a single space
 // reproduces the input's words in order (hard cuts excepted).
 func Split(text string, target, hardCap int) []string {
+	target = min(target, hardCap)
 	var out []string
 	cur := ""
 	flush := func() {
@@ -43,23 +44,30 @@ func sentences(text string) []string {
 	var out []string
 	var b strings.Builder
 	runes := []rune(text)
-	for i, r := range runes {
+	boundary := func(i int) bool {
+		return i >= len(runes) || runes[i] == ' ' || runes[i] == '\n'
+	}
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		if r == '\n' {
 			out = appendTrimmed(out, b.String())
 			b.Reset()
 			continue
 		}
 		b.WriteRune(r)
-		if r == '.' || r == '!' || r == '?' {
-			next := rune(0)
-			if i+1 < len(runes) {
-				next = runes[i+1]
-			}
-			if next == 0 || next == ' ' || next == '\n' || next == '"' {
-				out = appendTrimmed(out, b.String())
-				b.Reset()
-			}
+		if r != '.' && r != '!' && r != '?' {
+			continue
 		}
+		switch {
+		case boundary(i + 1):
+		case runes[i+1] == '"' && boundary(i+2):
+			b.WriteRune('"')
+			i++
+		default:
+			continue
+		}
+		out = appendTrimmed(out, b.String())
+		b.Reset()
 	}
 	return appendTrimmed(out, b.String())
 }
@@ -76,7 +84,7 @@ func capPieces(s string, hardCap int) []string {
 	for utf8.RuneCountInString(s) > hardCap {
 		r := []rune(s)
 		head := string(r[:hardCap])
-		cut := strings.LastIndex(head, ",")
+		cut := lastClauseComma(s, len(head))
 		if cut <= 0 {
 			cut = strings.LastIndex(head, " ")
 		}
@@ -89,4 +97,13 @@ func capPieces(s string, hardCap int) []string {
 		s = strings.TrimSpace(s[cut+1:])
 	}
 	return appendTrimmed(out, s)
+}
+
+func lastClauseComma(s string, headLen int) int {
+	for i := strings.LastIndex(s[:headLen], ","); i > 0; i = strings.LastIndex(s[:i], ",") {
+		if i+1 >= len(s) || s[i+1] == ' ' {
+			return i
+		}
+	}
+	return -1
 }
