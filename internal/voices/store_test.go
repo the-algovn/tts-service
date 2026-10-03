@@ -6,12 +6,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/the-algovn/tts-service/internal/cache"
 	"github.com/the-algovn/tts-service/internal/voices"
 )
 
-func TestMemoryStoreContract(t *testing.T) {
+func TestMemoryStoreContract(t *testing.T) { runStoreContract(t, voices.NewMemory()) }
+
+func runStoreContract(t *testing.T, s voices.Store) {
 	ctx := context.Background()
-	s := voices.NewMemory()
 	require.NoError(t, s.Put(ctx, "voices/a/x", []byte("1")))
 	require.NoError(t, s.Put(ctx, "voices/b/x", []byte("2")))
 	require.NoError(t, s.Put(ctx, "other/c", []byte("3")))
@@ -25,4 +27,13 @@ func TestMemoryStoreContract(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.NoError(t, s.Delete(ctx, "voices/missing"))
+	_, ok, err = s.Get(ctx, "voices/never")
+	require.NoError(t, err)
+	require.False(t, ok)
+	got, ok, err := s.Get(ctx, "voices/b/x")
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, []byte("2"), got)
 }
+
+var _ voices.Store = (*cache.S3)(nil)

@@ -57,3 +57,20 @@ func (s *S3) Put(ctx context.Context, key string, data []byte) error {
 		minio.PutObjectOptions{ContentType: "application/octet-stream"})
 	return err
 }
+
+// Delete removes key; a missing key is not an error.
+func (s *S3) Delete(ctx context.Context, key string) error {
+	return s.c.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
+}
+
+// List returns every object key that starts with prefix.
+func (s *S3) List(ctx context.Context, prefix string) ([]string, error) {
+	var out []string
+	for o := range s.c.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if o.Err != nil {
+			return nil, o.Err
+		}
+		out = append(out, o.Key)
+	}
+	return out, nil
+}

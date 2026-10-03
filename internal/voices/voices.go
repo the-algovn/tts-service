@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ var ErrNotFound = errors.New("voice not found")
 // InvalidError reports caller input that can never succeed as sent.
 type InvalidError struct{ Reason string }
 
+// Error describes which field was invalid and why.
 func (e *InvalidError) Error() string { return "invalid voice: " + e.Reason }
 
 // Voice is one registered voice. ID is the bare registry id ("v_<12hex>").
@@ -40,16 +42,17 @@ type NewVoice struct {
 // ValidateNew checks the fields of a voice about to be created. It returns an
 // *InvalidError naming the first bad field, or nil.
 func ValidateNew(in NewVoice) error {
+	label, refText := strings.TrimSpace(in.Label), strings.TrimSpace(in.RefText)
 	switch {
-	case strings.TrimSpace(in.Label) == "":
+	case label == "":
 		return &InvalidError{"label is required"}
-	case utf8.RuneCountInString(in.Label) > 80:
+	case utf8.RuneCountInString(label) > 80:
 		return &InvalidError{"label exceeds 80 characters"}
 	case in.Gender != "MALE" && in.Gender != "FEMALE" && in.Gender != "NEUTRAL":
 		return &InvalidError{"gender must be MALE, FEMALE or NEUTRAL"}
-	case strings.TrimSpace(in.RefText) == "":
+	case refText == "":
 		return &InvalidError{"ref_text is required"}
-	case utf8.RuneCountInString(in.RefText) > 500:
+	case utf8.RuneCountInString(refText) > 500:
 		return &InvalidError{"ref_text exceeds 500 characters"}
 	}
 	return nil
@@ -67,6 +70,8 @@ type Registry struct {
 func NewRegistry(s Store, now func() time.Time) *Registry {
 	return &Registry{s: s, now: now}
 }
+
+var idPattern = regexp.MustCompile(`^v_[0-9a-f]{12}$`)
 
 func refKey(id string) string  { return "voices/" + id + "/ref.wav" }
 func metaKey(id string) string { return "voices/" + id + "/voice.json" }
@@ -106,7 +111,7 @@ func (r *Registry) Create(ctx context.Context, in NewVoice, refWAV []byte) (Voic
 }
 
 // Get returns the voice and its reference WAV. ErrNotFound when the id has no
-// metadata record.
+// metadata record or its reference clip is missing, or when id is malformed.
 func (r *Registry) Get(ctx context.Context, id string) (Voice, []byte, error) {
 	v, err := r.meta(ctx, id)
 	if err != nil {
@@ -123,6 +128,9 @@ func (r *Registry) Get(ctx context.Context, id string) (Voice, []byte, error) {
 }
 
 func (r *Registry) meta(ctx context.Context, id string) (Voice, error) {
+	if !idPattern.MatchString(id) {
+		return Voice{}, ErrNotFound
+	}
 	raw, ok, err := r.s.Get(ctx, metaKey(id))
 	if err != nil {
 		return Voice{}, err
@@ -150,17 +158,25 @@ func (r *Registry) List(ctx context.Context) ([]Voice, error) {
 		}
 		id := strings.TrimSuffix(strings.TrimPrefix(k, "voices/"), "/voice.json")
 		v, err := r.meta(ctx, id)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out, nil
 }
 
 // Delete removes the voice. Metadata goes first so the voice stops existing
-// even if removing the clip fails. ErrNotFound when absent.
+// even if removing the clip fails. ErrNotFound when absent or id is malformed.
 func (r *Registry) Delete(ctx context.Context, id string) error {
 	if _, err := r.meta(ctx, id); err != nil {
 		return err
