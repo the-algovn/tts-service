@@ -32,6 +32,10 @@ PROMPT_CACHE_SIZE = 8
 _engine = None
 
 
+class Busy(Exception):
+    """Raised by render when another inference holds the engine."""
+
+
 class Engine:
     """One VoxCPM2 model, one inference at a time."""
 
@@ -65,7 +69,9 @@ class Engine:
         return p
 
     def render(self, text, ref_wav_path, ref_text, key=None):
-        with self._lock:
+        if not self._lock.acquire(blocking=False):
+            raise Busy()
+        try:
             prompt = self._prompt(ref_wav_path, ref_text, key) if ref_wav_path else None
             gen = self._m.tts_model._generate_with_prompt_cache(
                 target_text=text, prompt_cache=prompt, inference_timesteps=10,
@@ -75,6 +81,8 @@ class Engine:
             finally:
                 gen.close()
             return wav.squeeze(0).cpu().numpy()
+        finally:
+            self._lock.release()
 
 
 class SynthesizeRequest(BaseModel):
@@ -120,23 +128,29 @@ def synthesize(req: SynthesizeRequest) -> Response:
     if not clone and not req.description:
         raise HTTPException(400, "send a reference or a description")
 
-    if not clone:
-        audio = _engine.render(f"({req.description}){text}", None, None)
-    else:
-        try:
-            ref = base64.b64decode(req.ref_wav_b64, validate=True)
-        except (binascii.Error, ValueError) as e:
-            raise HTTPException(400, "ref_wav_b64 is not base64") from e
-        try:
-            sf.info(io.BytesIO(ref))
-        except Exception as e:
-            raise HTTPException(400, "ref_wav_b64 is not audio") from e
-        key = hashlib.sha256(ref + b"\0" + req.ref_text.encode()).hexdigest()
-        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
-            f.write(ref)
-            f.flush()
-            audio = _engine.render(text, f.name, req.ref_text, key)
+    try:
+        audio = _render(req, text, clone)
+    except Busy:
+        raise HTTPException(503, "busy") from None
 
     buf = io.BytesIO()
     sf.write(buf, audio, _engine.sample_rate, format="WAV")
     return Response(content=buf.getvalue(), media_type="audio/wav")
+
+
+def _render(req: SynthesizeRequest, text: str, clone: bool):
+    if not clone:
+        return _engine.render(f"({req.description}){text}", None, None)
+    try:
+        ref = base64.b64decode(req.ref_wav_b64, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise HTTPException(400, "ref_wav_b64 is not base64") from e
+    try:
+        sf.info(io.BytesIO(ref))
+    except Exception as e:
+        raise HTTPException(400, "ref_wav_b64 is not audio") from e
+    key = hashlib.sha256(ref + b"\0" + req.ref_text.encode()).hexdigest()
+    with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+        f.write(ref)
+        f.flush()
+        return _engine.render(text, f.name, req.ref_text, key)

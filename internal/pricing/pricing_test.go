@@ -21,6 +21,11 @@ func TestTierOf(t *testing.T) {
 	}
 }
 
+func TestVoxCPMIsFree(t *testing.T) {
+	require.Equal(t, 0.0, pricing.CostUSD("voxcpm", "v_aaaaaaaaaaaa", 1000))
+	require.Equal(t, int64(0), pricing.FreeTierChars("voxcpm", "v_aaaaaaaaaaaa"))
+}
+
 func TestCostUSDByTier(t *testing.T) {
 	// One million characters makes the per-1M rate readable directly.
 	require.InDelta(t, 30.0, pricing.CostUSD("google", "vi-VN-Chirp3-HD-Aoede", 1_000_000), 1e-9)

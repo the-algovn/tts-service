@@ -1,6 +1,7 @@
 package ttsserver_test
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
+	"github.com/the-algovn/tts-service/internal/audio"
 	"github.com/the-algovn/tts-service/internal/backend"
 	"github.com/the-algovn/tts-service/internal/ttsserver"
 	"github.com/the-algovn/tts-service/internal/voices"
@@ -22,9 +24,14 @@ type fakeDesigner struct{ takes int }
 
 func (f *fakeDesigner) Design(_ context.Context, _, _ string, takes int) ([][]byte, error) {
 	f.takes = takes
+	wav, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "sine=frequency=200:duration=1", "-f", "wav", "-").Output()
+	if err != nil {
+		return nil, err
+	}
 	out := make([][]byte, takes)
 	for i := range out {
-		out[i] = []byte("RIFFtake")
+		out[i] = wav
 	}
 	return out, nil
 }
@@ -100,6 +107,23 @@ func TestDesignVoiceBoundsTakes(t *testing.T) {
 		Description: "giong nu", SampleText: "chao", Takes: 2})
 	require.NoError(t, err)
 	require.Len(t, resp.GetTakes(), 2)
+	for _, take := range resp.GetTakes() {
+		secs, err := audio.Probe(context.Background(), take)
+		require.NoError(t, err)
+		require.InDelta(t, 1.0, secs, 0.2)
+		require.False(t, bytes.HasPrefix(take, []byte("RIFF")), "take must be MP3, not WAV")
+	}
+}
+
+func TestDesignVoiceSampleTextBound(t *testing.T) {
+	s, _ := registryServer(t)
+	req := func(n int) *ttsv1.DesignVoiceRequest {
+		return &ttsv1.DesignVoiceRequest{Description: "giong nu", SampleText: strings.Repeat("a", n), Takes: 1}
+	}
+	_, err := s.DesignVoice(context.Background(), req(251))
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+	_, err = s.DesignVoice(context.Background(), req(250))
+	require.NoError(t, err)
 }
 
 func TestDeleteVoice(t *testing.T) {

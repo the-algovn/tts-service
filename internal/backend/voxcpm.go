@@ -2,14 +2,19 @@ package backend
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sync/errgroup"
 
@@ -19,10 +24,18 @@ import (
 )
 
 const (
-	chunkTarget = 250
-	chunkCap    = 400
-	chunkGap    = 150 * time.Millisecond
+	chunkTargetMin = 80
+	chunkTargetMax = 250
+	chunkCap       = 400
+	chunkGap       = 150 * time.Millisecond
+	voiceCacheSize = 16
+	retryMin       = 250 * time.Millisecond
+	retryMax       = time.Second
 )
+
+// ErrInvalidInput marks a request the voxcpm backend rejects because of its
+// text or speaking rate, as opposed to a server-side failure.
+var ErrInvalidInput = errors.New("invalid input")
 
 // VoiceSource resolves a registry voice id to its record and reference clip.
 type VoiceSource interface {
@@ -40,9 +53,73 @@ type VoxCPMConfig struct {
 // is split into sentence chunks rendered concurrently, because one CPU
 // render of a whole break is slower than the director can wait.
 type VoxCPM struct {
-	cfg VoxCPMConfig
-	src VoiceSource
-	hc  *http.Client
+	cfg    VoxCPMConfig
+	src    VoiceSource
+	hc     *http.Client
+	voices *voiceCache
+}
+
+type cachedVoice struct {
+	id    string
+	voice voices.Voice
+	ref   []byte
+}
+
+// voiceCache is a small LRU of registry voices. Ids are immutable and never
+// reused, so an entry can never go stale.
+type voiceCache struct {
+	mu    sync.Mutex
+	order *list.List
+	items map[string]*list.Element
+}
+
+func newVoiceCache() *voiceCache {
+	return &voiceCache{order: list.New(), items: map[string]*list.Element{}}
+}
+
+func (c *voiceCache) get(id string) (cachedVoice, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.items[id]
+	if !ok {
+		return cachedVoice{}, false
+	}
+	c.order.MoveToFront(el)
+	return el.Value.(cachedVoice), true
+}
+
+func (c *voiceCache) put(cv cachedVoice) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.items[cv.id]; ok {
+		el.Value = cv
+		c.order.MoveToFront(el)
+		return
+	}
+	c.items[cv.id] = c.order.PushFront(cv)
+	if c.order.Len() > voiceCacheSize {
+		last := c.order.Back()
+		c.order.Remove(last)
+		delete(c.items, last.Value.(cachedVoice).id)
+	}
+}
+
+func (v *VoxCPM) voice(ctx context.Context, id string) (voices.Voice, []byte, error) {
+	if cv, ok := v.voices.get(id); ok {
+		return cv.voice, cv.ref, nil
+	}
+	voice, ref, err := v.src.Get(ctx, id)
+	if err != nil {
+		return voices.Voice{}, nil, err
+	}
+	v.voices.put(cachedVoice{id: id, voice: voice, ref: ref})
+	return voice, ref, nil
+}
+
+func chunkTarget(text string, parallel int) int {
+	n := utf8.RuneCountInString(text)
+	t := (n+parallel-1)/parallel + 20
+	return min(max(t, chunkTargetMin), chunkTargetMax)
 }
 
 // NewVoxCPM returns a client for the model server at cfg.BaseURL that looks
@@ -56,7 +133,7 @@ func NewVoxCPM(cfg VoxCPMConfig, src VoiceSource) *VoxCPM {
 	// to whichever pod a pooled connection landed on.
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DisableKeepAlives = true
-	return &VoxCPM{cfg: cfg, src: src, hc: &http.Client{Transport: tr}}
+	return &VoxCPM{cfg: cfg, src: src, hc: &http.Client{Transport: tr}, voices: newVoiceCache()}
 }
 
 type voxReq struct {
@@ -67,18 +144,24 @@ type voxReq struct {
 }
 
 // Synthesize renders text in the registry voice voiceName and returns WAV.
-// Errors wrap voices.ErrNotFound for an unknown voice; any failed chunk fails
-// the whole call.
+// Errors wrap voices.ErrNotFound for an unknown voice and ErrInvalidInput for
+// blank text or a rate outside 0.5-2.0; any failed chunk fails the whole call.
 func (v *VoxCPM) Synthesize(ctx context.Context, text, voiceName string, rate float64) ([]byte, string, error) {
-	voice, ref, err := v.src.Get(ctx, voiceName)
+	if rate < 0.5 || rate > 2.0 {
+		return nil, "", fmt.Errorf("%w: rate %.2f outside 0.5-2.0", ErrInvalidInput, rate)
+	}
+	if strings.TrimSpace(text) == "" {
+		return nil, "", fmt.Errorf("%w: text is blank", ErrInvalidInput)
+	}
+	voice, ref, err := v.voice(ctx, voiceName)
 	if err != nil {
 		return nil, "", fmt.Errorf("voice %s: %w", voiceName, err)
 	}
 	b64 := base64.StdEncoding.EncodeToString(ref)
 	refText := voice.RefText
-	chunks := chunk.Split(text, chunkTarget, chunkCap)
+	chunks := chunk.Split(text, chunkTarget(text, v.cfg.Parallel), chunkCap)
 	if len(chunks) == 0 {
-		return nil, "", fmt.Errorf("nothing to say")
+		return nil, "", fmt.Errorf("%w: nothing to say", ErrInvalidInput)
 	}
 	parts, err := v.renderAll(ctx, len(chunks), func(i int) voxReq {
 		return voxReq{Text: chunks[i], RefWAVB64: &b64, RefText: &refText}
@@ -125,27 +208,46 @@ func (v *VoxCPM) renderAll(ctx context.Context, n int, req func(i int) voxReq) (
 	return parts, nil
 }
 
+// render posts one request, retrying while a replica is busy (HTTP 503) or
+// unreachable, until ctx is done. Each attempt gets its own ChunkTimeout.
 func (v *VoxCPM) render(ctx context.Context, r voxReq) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, v.cfg.ChunkTimeout)
-	defer cancel()
 	body, err := json.Marshal(r)
 	if err != nil {
 		return nil, err
 	}
+	for {
+		wav, retry, err := v.attempt(ctx, body)
+		if err == nil || !retry || ctx.Err() != nil {
+			return wav, err
+		}
+		wait := retryMin + rand.N(retryMax-retryMin)
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(wait):
+		}
+	}
+}
+
+func (v *VoxCPM) attempt(parent context.Context, body []byte) (wav []byte, retry bool, err error) {
+	ctx, cancel := context.WithTimeout(parent, v.cfg.ChunkTimeout)
+	defer cancel()
 	hr, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimSuffix(v.cfg.BaseURL, "/")+"/synthesize", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	resp, err := v.hc.Do(hr)
 	if err != nil {
-		return nil, err
+		return nil, ctx.Err() == nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("voxcpm %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+		return nil, resp.StatusCode == http.StatusServiceUnavailable,
+			fmt.Errorf("voxcpm %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
-	return io.ReadAll(resp.Body)
+	wav, err = io.ReadAll(resp.Body)
+	return wav, false, err
 }

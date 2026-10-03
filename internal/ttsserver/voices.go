@@ -69,7 +69,7 @@ func (s *Server) CreateVoice(ctx context.Context, req *ttsv1.CreateVoiceRequest)
 	return &ttsv1.CreateVoiceResponse{Voice: toProtoVoice(v)}, nil
 }
 
-// DesignVoice renders 1-3 candidate takes of a voice described in text. It
+// DesignVoice renders 1-3 candidate takes (MP3) of a voice described in text. It
 // returns InvalidArgument for out-of-range inputs, FailedPrecondition when the
 // registry is not configured, and Unavailable when the model server fails.
 func (s *Server) DesignVoice(ctx context.Context, req *ttsv1.DesignVoiceRequest) (*ttsv1.DesignVoiceResponse, error) {
@@ -80,14 +80,21 @@ func (s *Server) DesignVoice(ctx context.Context, req *ttsv1.DesignVoiceRequest)
 	switch {
 	case desc == "" || utf8.RuneCountInString(desc) > 300:
 		return nil, status.Error(codes.InvalidArgument, "description must be 1-300 characters")
-	case sample == "" || utf8.RuneCountInString(sample) > 500:
-		return nil, status.Error(codes.InvalidArgument, "sample_text must be 1-500 characters")
+	case sample == "" || utf8.RuneCountInString(sample) > 250:
+		return nil, status.Error(codes.InvalidArgument, "sample_text must be 1-250 characters")
 	case req.GetTakes() < 1 || req.GetTakes() > 3:
 		return nil, status.Error(codes.InvalidArgument, "takes must be 1-3")
 	}
 	takes, err := s.deps.Designer.Design(ctx, desc, sample, int(req.GetTakes()))
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "design failed: %v", err)
+	}
+	for i, wav := range takes {
+		mp3, err := audio.ToMP3(ctx, wav)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "encode take: %v", err)
+		}
+		takes[i] = mp3
 	}
 	return &ttsv1.DesignVoiceResponse{Takes: takes}, nil
 }

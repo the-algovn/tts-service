@@ -56,7 +56,7 @@ The image is pushed by hand (like VieNeu), not by CI.
 ```bash
 cd deploy/voxcpm
 docker buildx build --platform linux/amd64 -t ghcr.io/the-algovn/tts-service-voxcpm:main --load .
-docker run --rm -e VOXCPM_SKIP_LOAD=1 ghcr.io/the-algovn/tts-service-voxcpm:main pytest -q test_server.py
+docker run --rm --network none -e VOXCPM_SKIP_LOAD=1 ghcr.io/the-algovn/tts-service-voxcpm:main pytest -q test_server.py
 docker run -d --name vx -p 8080:8080 -e TORCH_THREADS=8 ghcr.io/the-algovn/tts-service-voxcpm:main
 until curl -sf localhost:8080/healthz; do sleep 5; done
 curl -s -X POST localhost:8080/synthesize -H 'Content-Type: application/json' \

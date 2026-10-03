@@ -60,6 +60,7 @@ func main() {
 	}
 
 	srv := grpc.NewServer(
+		grpc.MaxRecvMsgSize(16<<20),
 		grpc.StatsHandler(obs.ServerHandler()),
 		grpc.ChainUnaryInterceptor(obs.UnaryServerInterceptor()),
 	)

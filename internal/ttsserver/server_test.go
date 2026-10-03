@@ -287,3 +287,15 @@ func TestListVoicesSurvivesRegistryFailure(t *testing.T) {
 	require.Len(t, resp.GetVoices(), 1)
 	require.Equal(t, "vieneu:custom-1", resp.GetVoices()[0].GetId())
 }
+
+type invalidInputBackend struct{}
+
+func (invalidInputBackend) Synthesize(context.Context, string, string, float64) ([]byte, string, error) {
+	return nil, "", fmt.Errorf("%w: blank", backend.ErrInvalidInput)
+}
+
+func TestSynthesizeMapsInvalidInputToInvalidArgument(t *testing.T) {
+	_, err := newServer(invalidInputBackend{}).Synthesize(context.Background(), &ttsv1.SynthesizeRequest{
+		Text: "x", VoiceId: "google:vi-VN-Standard-A"})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}

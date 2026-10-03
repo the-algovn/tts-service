@@ -44,6 +44,7 @@ func Probe(ctx context.Context, data []byte) (float64, error) {
 }
 
 // NormalizeWAV decodes any audio and returns 48 kHz mono 16-bit PCM WAV.
+// It returns an error when ffmpeg cannot decode data or the context ends.
 func NormalizeWAV(ctx context.Context, data []byte) ([]byte, error) {
 	return reencode(ctx, data, "-ac", "1", "-ar", outRate, "-c:a", "pcm_s16le", "-f", "wav")
 }
@@ -61,7 +62,8 @@ func Tempo(ctx context.Context, wav []byte, rate float64) ([]byte, error) {
 }
 
 // ConcatWAV joins parts in order with gap of silence between consecutive
-// parts. Output is 48 kHz mono 16-bit WAV.
+// parts. Output is 48 kHz mono 16-bit WAV. It returns an error when parts is
+// empty, a part is not decodable audio, or the context ends.
 func ConcatWAV(ctx context.Context, parts [][]byte, gap time.Duration) ([]byte, error) {
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("no parts")

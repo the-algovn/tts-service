@@ -120,6 +120,9 @@ func (s *Server) Synthesize(ctx context.Context, req *ttsv1.SynthesizeRequest) (
 		if errors.Is(err, voices.ErrNotFound) {
 			return nil, status.Errorf(codes.InvalidArgument, "unknown voice %q", req.GetVoiceId())
 		}
+		if errors.Is(err, backend.ErrInvalidInput) {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
 		return nil, status.Errorf(codes.Unavailable, "synthesis failed: %v", err)
 	}
 

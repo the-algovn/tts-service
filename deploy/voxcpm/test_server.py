@@ -1,6 +1,7 @@
 import base64
 import io
 import re
+import threading
 from collections import OrderedDict
 from types import SimpleNamespace
 
@@ -101,3 +102,23 @@ def test_prompt_lru():
     eng._prompt("p", "k8", "k8")
     assert len(eng._prompts) == server.PROMPT_CACHE_SIZE
     assert "k1" not in eng._prompts and "k0" in eng._prompts
+
+
+def test_busy_engine_is_503(client):
+    c, fake = client
+
+    def busy(*_a, **_k):
+        raise server.Busy()
+
+    fake.render = busy
+    r = c.post("/synthesize", json={"text": "xin chao", "description": "giong nu"})
+    assert r.status_code == 503
+    assert r.json()["detail"] == "busy"
+
+
+def test_render_rejects_while_lock_held():
+    eng = object.__new__(server.Engine)
+    eng._lock = threading.Lock()
+    with eng._lock:
+        with pytest.raises(server.Busy):
+            eng.render("x", None, None)
