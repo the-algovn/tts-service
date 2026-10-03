@@ -5,6 +5,7 @@ package ttsserver
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"unicode/utf8"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/the-algovn/tts-service/internal/cache"
 	"github.com/the-algovn/tts-service/internal/catalog"
 	"github.com/the-algovn/tts-service/internal/pricing"
+	"github.com/the-algovn/tts-service/internal/voices"
 )
 
 // maxTextChars bounds one utterance. The bound is derived from the default
@@ -40,6 +42,10 @@ type Deps struct {
 	// Synthesize report the backend that actually served the request instead
 	// of the one the caller asked for.
 	GoogleIsFake bool
+	// Voices and Designer back the registry RPCs and the voxcpm entries in
+	// ListVoices; both nil when VOXCPM_URL is unset.
+	Voices   *voices.Registry
+	Designer Designer
 }
 
 type Server struct {
@@ -111,6 +117,9 @@ func (s *Server) Synthesize(ctx context.Context, req *ttsv1.SynthesizeRequest) (
 	if err != nil {
 		s.deps.Logger.ErrorContext(ctx, "synthesis failed",
 			"provider", provider, "voice", name, "label", req.GetLabel(), "err", err)
+		if errors.Is(err, voices.ErrNotFound) {
+			return nil, status.Errorf(codes.InvalidArgument, "unknown voice %q", req.GetVoiceId())
+		}
 		return nil, status.Errorf(codes.Unavailable, "synthesis failed: %v", err)
 	}
 
@@ -156,6 +165,15 @@ func (s *Server) ListVoices(ctx context.Context, _ *ttsv1.ListVoicesRequest) (*t
 			Id: v.ID, Label: v.Label, Provider: v.Provider, Tier: v.Tier,
 			Gender: v.Gender, FreeTierCharsPerMonth: v.FreeTierChars,
 		})
+	}
+	if s.deps.Voices != nil {
+		reg, err := s.deps.Voices.List(ctx)
+		if err != nil {
+			s.deps.Logger.WarnContext(ctx, "voice registry unavailable", "err", err)
+		}
+		for _, v := range reg {
+			out = append(out, toProtoVoice(v))
+		}
 	}
 	return &ttsv1.ListVoicesResponse{Voices: out}, nil
 }

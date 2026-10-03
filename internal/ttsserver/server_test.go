@@ -3,6 +3,7 @@ package ttsserver_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/the-algovn/tts-service/internal/cache"
 	"github.com/the-algovn/tts-service/internal/catalog"
 	"github.com/the-algovn/tts-service/internal/ttsserver"
+	"github.com/the-algovn/tts-service/internal/voices"
 )
 
 // counting wraps a backend to prove the cache prevents a second call.
@@ -251,4 +253,37 @@ func TestListVoicesMergesGoogleAndVieNeu(t *testing.T) {
 	require.Equal(t, "standard", v.GetTier())
 	require.Equal(t, "FEMALE", v.GetGender())
 	require.EqualValues(t, 0, v.GetFreeTierCharsPerMonth())
+}
+
+type notFoundBackend struct{}
+
+func (notFoundBackend) Synthesize(_ context.Context, _, voice string, _ float64) ([]byte, string, error) {
+	return nil, "", fmt.Errorf("voice %s: %w", voice, voices.ErrNotFound)
+}
+
+func TestSynthesizeUnknownVoiceIsInvalidArgument(t *testing.T) {
+	s := ttsserver.New(ttsserver.Deps{
+		Logger:   slog.Default(),
+		Backends: map[string]backend.Backend{"voxcpm": notFoundBackend{}},
+	})
+	_, err := s.Synthesize(context.Background(), &ttsv1.SynthesizeRequest{Text: "xin chao", VoiceId: "voxcpm:v_000000000000"})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+type failingListStore struct{ *voices.Memory }
+
+func (failingListStore) List(_ context.Context, _ string) ([]string, error) {
+	return nil, errors.New("list boom")
+}
+
+func TestListVoicesSurvivesRegistryFailure(t *testing.T) {
+	s := ttsserver.New(ttsserver.Deps{
+		Logger:       slog.Default(),
+		VieNeuVoices: []catalog.Voice{{ID: "vieneu:custom-1", Label: "Custom One", Provider: "vieneu"}},
+		Voices:       voices.NewRegistry(failingListStore{voices.NewMemory()}, time.Now),
+	})
+	resp, err := s.ListVoices(context.Background(), &ttsv1.ListVoicesRequest{})
+	require.NoError(t, err)
+	require.Len(t, resp.GetVoices(), 1)
+	require.Equal(t, "vieneu:custom-1", resp.GetVoices()[0].GetId())
 }

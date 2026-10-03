@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/the-algovn/tts-service/internal/catalog"
 	"github.com/the-algovn/tts-service/internal/config"
 	"github.com/the-algovn/tts-service/internal/ttsserver"
+	"github.com/the-algovn/tts-service/internal/voices"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=<sha>".
@@ -96,6 +98,41 @@ func main() {
 		store = s3
 	}
 
+	var registry *voices.Registry
+	var designer ttsserver.Designer
+	if u := config.Get("VOXCPM_URL", ""); u != "" {
+		ep := config.Get("MINIO_ENDPOINT", "")
+		if ep == "" {
+			logger.ErrorContext(ctx, "VOXCPM_URL needs MINIO_ENDPOINT for the voice registry")
+			os.Exit(1)
+		}
+		vs, err := cache.NewS3(cache.Config{
+			Endpoint:  ep,
+			AccessKey: config.Get("MINIO_ACCESS_KEY", ""),
+			SecretKey: config.Get("MINIO_SECRET_KEY", ""),
+			Bucket:    config.Get("VOICES_BUCKET", "tts-voices"),
+			UseSSL:    config.Get("MINIO_USE_SSL", "false") == "true",
+		})
+		if err != nil {
+			logger.ErrorContext(ctx, "voice store setup failed", "err", err)
+			os.Exit(1)
+		}
+		registry = voices.NewRegistry(vs, time.Now)
+		parallel, err := strconv.Atoi(config.Get("VOXCPM_PARALLEL", "3"))
+		if err != nil || parallel < 1 {
+			logger.ErrorContext(ctx, "VOXCPM_PARALLEL must be a positive integer")
+			os.Exit(1)
+		}
+		timeout, err := time.ParseDuration(config.Get("VOXCPM_CHUNK_TIMEOUT", "180s"))
+		if err != nil || timeout <= 0 {
+			logger.ErrorContext(ctx, "VOXCPM_CHUNK_TIMEOUT must be a positive duration", "err", err)
+			os.Exit(1)
+		}
+		vx := backend.NewVoxCPM(backend.VoxCPMConfig{BaseURL: u, Parallel: parallel, ChunkTimeout: timeout}, registry)
+		backends["voxcpm"] = vx
+		designer = vx
+	}
+
 	ttsv1.RegisterTTSServiceServer(srv, ttsserver.New(ttsserver.Deps{
 		Logger:       logger,
 		Backends:     backends,
@@ -103,6 +140,8 @@ func main() {
 		Google:       googleSrc,
 		VieNeuVoices: catalog.VieNeuVoices(),
 		GoogleIsFake: googleIsFake,
+		Voices:       registry,
+		Designer:     designer,
 	}))
 	healthpb.RegisterHealthServer(srv, health.NewServer())
 	reflection.Register(srv)
