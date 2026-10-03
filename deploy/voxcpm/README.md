@@ -12,7 +12,7 @@ GET /healthz -> 200 once the model is resident. The model loads before the
 ```
 
 Unused fields are sent as JSON null. Errors are non-200 with a short body
-(400 for bad requests, 503 while loading). Text is limited to 600 characters.
+(400 for bad requests; 503 only when the model is not loaded, i.e. under VOXCPM_SKIP_LOAD=1). Text is limited to 600 characters.
 
 ## Model and licence
 
