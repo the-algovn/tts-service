@@ -8,7 +8,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/minio v0.43.0
 	github.com/the-algovn/gopkg v0.1.0
-	github.com/the-algovn/protos/gen/go v0.19.0
+	github.com/the-algovn/protos/gen/go v0.26.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/text v0.40.0
 	google.golang.org/grpc v1.83.0
