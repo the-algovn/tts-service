@@ -42,11 +42,14 @@ type VoiceSource interface {
 	Get(ctx context.Context, id string) (voices.Voice, []byte, error)
 }
 
-// VoxCPMConfig configures the VoxCPM2 model-server client.
+// VoxCPMConfig configures the VoxCPM2 model-server client. One render
+// attempt may take ChunkTimeout plus CharTimeout per character of its text,
+// because a CPU render grows with the length of what it says.
 type VoxCPMConfig struct {
 	BaseURL      string
 	Parallel     int
 	ChunkTimeout time.Duration
+	CharTimeout  time.Duration
 }
 
 // VoxCPM renders registry voices on the self-hosted VoxCPM2 pods. A script
@@ -209,14 +212,15 @@ func (v *VoxCPM) renderAll(ctx context.Context, n int, req func(i int) voxReq) (
 }
 
 // render posts one request, retrying while a replica is busy (HTTP 503) or
-// unreachable, until ctx is done. Each attempt gets its own ChunkTimeout.
+// unreachable, until ctx is done. Each attempt gets its own timeout.
 func (v *VoxCPM) render(ctx context.Context, r voxReq) ([]byte, error) {
 	body, err := json.Marshal(r)
 	if err != nil {
 		return nil, err
 	}
+	timeout := v.cfg.ChunkTimeout + time.Duration(utf8.RuneCountInString(r.Text))*v.cfg.CharTimeout
 	for {
-		wav, retry, err := v.attempt(ctx, body)
+		wav, retry, err := v.attempt(ctx, body, timeout)
 		if err == nil || !retry || ctx.Err() != nil {
 			return wav, err
 		}
@@ -229,8 +233,8 @@ func (v *VoxCPM) render(ctx context.Context, r voxReq) ([]byte, error) {
 	}
 }
 
-func (v *VoxCPM) attempt(parent context.Context, body []byte) (wav []byte, retry bool, err error) {
-	ctx, cancel := context.WithTimeout(parent, v.cfg.ChunkTimeout)
+func (v *VoxCPM) attempt(parent context.Context, body []byte, timeout time.Duration) (wav []byte, retry bool, err error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	hr, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimSuffix(v.cfg.BaseURL, "/")+"/synthesize", bytes.NewReader(body))

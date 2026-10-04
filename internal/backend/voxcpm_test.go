@@ -399,3 +399,17 @@ func TestVoxCPMChunkTimeout(t *testing.T) {
 	_, _, err := v.Synthesize(context.Background(), "xin chao.", "v_aaaaaaaaaaaa", 1.0)
 	require.Error(t, err)
 }
+
+func TestVoxCPMChunkTimeoutGrowsWithText(t *testing.T) {
+	wav := toneWAV(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write(wav)
+	}))
+	defer srv.Close()
+	v := backend.NewVoxCPM(backend.VoxCPMConfig{BaseURL: srv.URL, Parallel: 1,
+		ChunkTimeout: 50 * time.Millisecond, CharTimeout: 100 * time.Millisecond},
+		fakeVoices{"v_aaaaaaaaaaaa": {RefText: "x"}})
+	_, _, err := v.Synthesize(context.Background(), "xin chao.", "v_aaaaaaaaaaaa", 1.0)
+	require.NoError(t, err)
+}

@@ -105,12 +105,18 @@ func main() {
 			logger.ErrorContext(ctx, "VOXCPM_PARALLEL must be a positive integer")
 			os.Exit(1)
 		}
-		timeout, err := time.ParseDuration(config.Get("VOXCPM_CHUNK_TIMEOUT", "180s"))
+		timeout, err := time.ParseDuration(config.Get("VOXCPM_CHUNK_TIMEOUT", "60s"))
 		if err != nil || timeout <= 0 {
 			logger.ErrorContext(ctx, "VOXCPM_CHUNK_TIMEOUT must be a positive duration", "err", err)
 			os.Exit(1)
 		}
-		vx := backend.NewVoxCPM(backend.VoxCPMConfig{BaseURL: u, Parallel: parallel, ChunkTimeout: timeout}, registry)
+		perChar, err := time.ParseDuration(config.Get("VOXCPM_CHAR_TIMEOUT", "2s"))
+		if err != nil || perChar < 0 {
+			logger.ErrorContext(ctx, "VOXCPM_CHAR_TIMEOUT must be a non-negative duration", "err", err)
+			os.Exit(1)
+		}
+		vx := backend.NewVoxCPM(backend.VoxCPMConfig{BaseURL: u, Parallel: parallel,
+			ChunkTimeout: timeout, CharTimeout: perChar}, registry)
 		backends["voxcpm"] = vx
 		designer = vx
 	}
