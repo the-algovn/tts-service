@@ -11,18 +11,18 @@ import (
 
 // Every input that changes the audio must change the key.
 func TestKeyVariesWithEveryInput(t *testing.T) {
-	base := cache.Key("google", "vi-VN-Wavenet-B", 1.0, "mp3", "xin chào")
+	base := cache.Key("voxcpm", "v_a", 1.0, "mp3", "xin chào")
 
-	require.NotEqual(t, base, cache.Key("vieneu", "vi-VN-Wavenet-B", 1.0, "mp3", "xin chào"))
-	require.NotEqual(t, base, cache.Key("google", "vi-VN-Wavenet-D", 1.0, "mp3", "xin chào"))
-	require.NotEqual(t, base, cache.Key("google", "vi-VN-Wavenet-B", 1.2, "mp3", "xin chào"))
-	require.NotEqual(t, base, cache.Key("google", "vi-VN-Wavenet-B", 1.0, "wav", "xin chào"))
-	require.NotEqual(t, base, cache.Key("google", "vi-VN-Wavenet-B", 1.0, "mp3", "tạm biệt"))
+	require.NotEqual(t, base, cache.Key("fake", "v_a", 1.0, "mp3", "xin chào"))
+	require.NotEqual(t, base, cache.Key("voxcpm", "v_b", 1.0, "mp3", "xin chào"))
+	require.NotEqual(t, base, cache.Key("voxcpm", "v_a", 1.2, "mp3", "xin chào"))
+	require.NotEqual(t, base, cache.Key("voxcpm", "v_a", 1.0, "wav", "xin chào"))
+	require.NotEqual(t, base, cache.Key("voxcpm", "v_a", 1.0, "mp3", "tạm biệt"))
 }
 
 func TestKeyIsStable(t *testing.T) {
-	a := cache.Key("google", "vi-VN-Wavenet-B", 1.0, "mp3", "xin chào")
-	b := cache.Key("google", "vi-VN-Wavenet-B", 1.0, "mp3", "xin chào")
+	a := cache.Key("voxcpm", "v_a", 1.0, "mp3", "xin chào")
+	b := cache.Key("voxcpm", "v_a", 1.0, "mp3", "xin chào")
 	require.Equal(t, a, b)
 }
 
@@ -34,8 +34,8 @@ func TestKeyNormalizesUnicode(t *testing.T) {
 	require.NotEqual(t, precomposed, decomposed, "test inputs must differ byte-wise")
 
 	require.Equal(t,
-		cache.Key("google", "v", 1.0, "mp3", precomposed),
-		cache.Key("google", "v", 1.0, "mp3", decomposed))
+		cache.Key("voxcpm", "v", 1.0, "mp3", precomposed),
+		cache.Key("voxcpm", "v", 1.0, "mp3", decomposed))
 }
 
 func TestMemoryStoreRoundTrips(t *testing.T) {

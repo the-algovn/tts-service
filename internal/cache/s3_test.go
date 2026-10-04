@@ -42,13 +42,13 @@ func TestS3GetMissAndRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 
 	// A cold cache is the normal state: a missing key is a miss, not an error.
-	_, ok, err := s.Get(ctx, "tts/google/deadbeef.mp3")
+	_, ok, err := s.Get(ctx, "tts/voxcpm/deadbeef.mp3")
 	require.NoError(t, err)
 	require.False(t, ok)
 
-	require.NoError(t, s.Put(ctx, "tts/google/deadbeef.mp3", []byte("audio-bytes")))
+	require.NoError(t, s.Put(ctx, "tts/voxcpm/deadbeef.mp3", []byte("audio-bytes")))
 
-	got, ok, err := s.Get(ctx, "tts/google/deadbeef.mp3")
+	got, ok, err := s.Get(ctx, "tts/voxcpm/deadbeef.mp3")
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, []byte("audio-bytes"), got)

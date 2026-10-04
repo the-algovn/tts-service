@@ -21,7 +21,6 @@ import (
 	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
 	"github.com/the-algovn/tts-service/internal/backend"
 	"github.com/the-algovn/tts-service/internal/cache"
-	"github.com/the-algovn/tts-service/internal/catalog"
 	"github.com/the-algovn/tts-service/internal/config"
 	"github.com/the-algovn/tts-service/internal/ttsserver"
 	"github.com/the-algovn/tts-service/internal/voices"
@@ -65,24 +64,6 @@ func main() {
 		grpc.ChainUnaryInterceptor(obs.UnaryServerInterceptor()),
 	)
 	backends := map[string]backend.Backend{"fake": backend.Fake{}}
-	var googleSrc *catalog.GoogleSource
-	googleIsFake := false
-	if k := config.Get("GOOGLE_TTS_API_KEY", ""); k != "" {
-		backends["google"] = backend.NewGoogle(k)
-		googleSrc = &catalog.GoogleSource{APIKey: k, TTL: time.Hour}
-	} else {
-		// Keyless dev: bare and google-namespaced ids still resolve, to
-		// silence. googleIsFake tells the server so it reports the actual
-		// (fake) provider instead of "google".
-		backends["google"] = backend.Fake{}
-		googleIsFake = true
-		logger.WarnContext(ctx, "no google tts key; google voices synthesize silence")
-	}
-
-	if u := config.Get("VIENEU_URL", ""); u != "" {
-		backends["vieneu"] = backend.NewVieNeu(u)
-	}
-
 	var store cache.Store
 	if ep := config.Get("MINIO_ENDPOINT", ""); ep != "" {
 		s3, err := cache.NewS3(cache.Config{
@@ -135,14 +116,11 @@ func main() {
 	}
 
 	ttsv1.RegisterTTSServiceServer(srv, ttsserver.New(ttsserver.Deps{
-		Logger:       logger,
-		Backends:     backends,
-		Cache:        store,
-		Google:       googleSrc,
-		VieNeuVoices: catalog.VieNeuVoices(),
-		GoogleIsFake: googleIsFake,
-		Voices:       registry,
-		Designer:     designer,
+		Logger:   logger,
+		Backends: backends,
+		Cache:    store,
+		Voices:   registry,
+		Designer: designer,
 	}))
 	healthpb.RegisterHealthServer(srv, health.NewServer())
 	reflection.Register(srv)

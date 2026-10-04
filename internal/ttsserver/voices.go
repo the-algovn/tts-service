@@ -11,7 +11,6 @@ import (
 
 	ttsv1 "github.com/the-algovn/protos/gen/go/algovn/tts/v1"
 	"github.com/the-algovn/tts-service/internal/audio"
-	"github.com/the-algovn/tts-service/internal/catalog"
 	"github.com/the-algovn/tts-service/internal/voices"
 )
 
@@ -31,6 +30,11 @@ func (s *Server) registryReady() error {
 		return status.Error(codes.FailedPrecondition, "voice registry not configured")
 	}
 	return nil
+}
+
+func splitVoiceID(id string) (provider, name string, ok bool) {
+	provider, name, ok = strings.Cut(id, ":")
+	return provider, name, ok && provider != "" && name != ""
 }
 
 func toProtoVoice(v voices.Voice) *ttsv1.Voice {
@@ -106,8 +110,8 @@ func (s *Server) DeleteVoice(ctx context.Context, req *ttsv1.DeleteVoiceRequest)
 	if err := s.registryReady(); err != nil {
 		return nil, err
 	}
-	provider, name := catalog.Resolve(req.GetId())
-	if provider != providerVoxCPM {
+	provider, name, ok := splitVoiceID(req.GetId())
+	if !ok || provider != providerVoxCPM {
 		return nil, status.Error(codes.InvalidArgument, "only voxcpm voices can be deleted")
 	}
 	if err := s.deps.Voices.Delete(ctx, name); err != nil {

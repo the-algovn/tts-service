@@ -135,7 +135,7 @@ func TestDeleteVoice(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.DeleteVoice(context.Background(), &ttsv1.DeleteVoiceRequest{Id: resp.GetVoice().GetId()})
 	require.Equal(t, codes.NotFound, status.Code(err))
-	_, err = s.DeleteVoice(context.Background(), &ttsv1.DeleteVoiceRequest{Id: "google:vi-VN-Neural2-A"})
+	_, err = s.DeleteVoice(context.Background(), &ttsv1.DeleteVoiceRequest{Id: "fake:some-voice"})
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 

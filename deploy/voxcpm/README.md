@@ -51,7 +51,7 @@ PyTorch index, 2.14.1 does not exist there).
 
 ## Build, test, push
 
-The image is pushed by hand (like VieNeu), not by CI.
+The image is pushed by hand not by CI.
 
 ```bash
 cd deploy/voxcpm

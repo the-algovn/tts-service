@@ -1,5 +1,5 @@
 // Package ttsserver implements algovn.tts.v1.TTSService. It owns request
-// validation and assembles catalog, cache, backend and pricing; each of those
+// validation and assembles cache, backend and the voice registry; each of those
 // concerns lives in its own package.
 package ttsserver
 
@@ -16,34 +16,24 @@ import (
 	"github.com/the-algovn/tts-service/internal/audio"
 	"github.com/the-algovn/tts-service/internal/backend"
 	"github.com/the-algovn/tts-service/internal/cache"
-	"github.com/the-algovn/tts-service/internal/catalog"
-	"github.com/the-algovn/tts-service/internal/pricing"
 	"github.com/the-algovn/tts-service/internal/voices"
 )
 
 // maxTextChars bounds one utterance. The bound is derived from the default
 // 4MB gRPC message limit, not an arbitrary sizing choice: neither this
-// server nor its callers raise MaxCallRecvMsgSize/MaxCallSendMsgSize, and on
-// the VieNeu path text transcodes to roughly 1MB of MP3 per minute of
-// speech. 5000 Vietnamese characters (~5 minutes) produced ~4.8MB -- a
+// server nor its callers raise MaxCallRecvMsgSize/MaxCallSendMsgSize, and
+// text transcodes to roughly 1MB of MP3 per minute of speech. 5000 Vietnamese characters (~5 minutes) produced ~4.8MB -- a
 // request this service would have declared legal but could not deliver,
 // after doing all the synthesis work. 2000 characters (~2 minutes, ~1.9MB)
 // stays safely under the limit.
 const maxTextChars = 2000
 
 type Deps struct {
-	Logger       *slog.Logger
-	Backends     map[string]backend.Backend
-	Cache        cache.Store
-	Google       *catalog.GoogleSource
-	VieNeuVoices []catalog.Voice
-	// GoogleIsFake is true when main.go substituted backend.Fake{} under the
-	// "google" key because GOOGLE_TTS_API_KEY is absent (keyless dev). It lets
-	// Synthesize report the backend that actually served the request instead
-	// of the one the caller asked for.
-	GoogleIsFake bool
-	// Voices and Designer back the registry RPCs and the voxcpm entries in
-	// ListVoices; both nil when VOXCPM_URL is unset.
+	Logger   *slog.Logger
+	Backends map[string]backend.Backend
+	Cache    cache.Store
+	// Voices and Designer back the registry RPCs and ListVoices; both nil
+	// when VOXCPM_URL is unset.
 	Voices   *voices.Registry
 	Designer Designer
 }
@@ -80,18 +70,13 @@ func (s *Server) Synthesize(ctx context.Context, req *ttsv1.SynthesizeRequest) (
 		return nil, status.Errorf(codes.InvalidArgument, "text exceeds %d characters", maxTextChars)
 	}
 
-	provider, name := catalog.Resolve(req.GetVoiceId())
+	provider, name, ok := splitVoiceID(req.GetVoiceId())
+	if !ok {
+		return nil, status.Errorf(codes.InvalidArgument, "voice_id %q must be \"provider:name\"", req.GetVoiceId())
+	}
 	be, ok := s.deps.Backends[provider]
 	if !ok {
 		return nil, status.Errorf(codes.InvalidArgument, "unknown provider %q", provider)
-	}
-
-	// A keyless box substitutes backend.Fake{} under the "google" key (see
-	// GoogleIsFake); report the backend that actually served the request, or
-	// a keyless deploy would charge the Google list price for silence.
-	effectiveProvider := provider
-	if provider == "google" && s.deps.GoogleIsFake {
-		effectiveProvider = "fake"
 	}
 
 	wantExt := extOf(req.GetFormat())
@@ -99,7 +84,7 @@ func (s *Server) Synthesize(ctx context.Context, req *ttsv1.SynthesizeRequest) (
 	if rate == 0 {
 		rate = 1.0
 	}
-	key := cache.Key(effectiveProvider, name, rate, wantExt, req.GetText())
+	key := cache.Key(provider, name, rate, wantExt, req.GetText())
 
 	if s.deps.Cache != nil {
 		if data, hit, err := s.deps.Cache.Get(ctx, key); err != nil {
@@ -108,7 +93,7 @@ func (s *Server) Synthesize(ctx context.Context, req *ttsv1.SynthesizeRequest) (
 		} else if hit {
 			return &ttsv1.SynthesizeResponse{
 				Audio: data, Format: formatOf(wantExt), VoiceId: req.GetVoiceId(),
-				Provider: effectiveProvider, CostUsd: 0, CacheHit: true,
+				Provider: provider, CostUsd: 0, CacheHit: true,
 			}, nil
 		}
 	}
@@ -138,37 +123,20 @@ func (s *Server) Synthesize(ctx context.Context, req *ttsv1.SynthesizeRequest) (
 		}
 	}
 
-	cost := pricing.CostUSD(effectiveProvider, name, chars)
 	s.deps.Logger.InfoContext(ctx, "synthesized",
-		"provider", effectiveProvider, "voice", name, "chars", chars,
-		"cost_usd", cost, "label", req.GetLabel())
+		"provider", provider, "voice", name, "chars", chars, "label", req.GetLabel())
 
 	return &ttsv1.SynthesizeResponse{
 		Audio: data, Format: formatOf(wantExt), VoiceId: req.GetVoiceId(),
-		Provider: effectiveProvider, CostUsd: cost, CacheHit: false,
+		Provider: provider, CostUsd: 0, CacheHit: false,
 	}, nil
 }
 
+// ListVoices returns every voice in the self-hosted registry. A registry
+// failure is logged and yields an empty list rather than an error: a voice
+// list is a picker, not a dependency of speech itself.
 func (s *Server) ListVoices(ctx context.Context, _ *ttsv1.ListVoicesRequest) (*ttsv1.ListVoicesResponse, error) {
-	var all []catalog.Voice
-	if s.deps.Google != nil {
-		gv, err := s.deps.Google.Voices(ctx)
-		if err != nil {
-			// A voice list is a picker, not a dependency of speech itself.
-			s.deps.Logger.WarnContext(ctx, "google catalog unavailable", "err", err)
-		} else {
-			all = append(all, gv...)
-		}
-	}
-	all = append(all, s.deps.VieNeuVoices...)
-
-	out := make([]*ttsv1.Voice, 0, len(all))
-	for _, v := range all {
-		out = append(out, &ttsv1.Voice{
-			Id: v.ID, Label: v.Label, Provider: v.Provider, Tier: v.Tier,
-			Gender: v.Gender, FreeTierCharsPerMonth: v.FreeTierChars,
-		})
-	}
+	out := []*ttsv1.Voice{}
 	if s.deps.Voices != nil {
 		reg, err := s.deps.Voices.List(ctx)
 		if err != nil {

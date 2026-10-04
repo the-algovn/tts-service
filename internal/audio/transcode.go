@@ -14,7 +14,7 @@ import (
 )
 
 // Convert returns data unchanged when it is already in the wanted container,
-// so the common path (Google emits mp3, caller wants mp3) never forks a process.
+// so the common path (the backend emits mp3, caller wants mp3) never forks a process.
 func Convert(ctx context.Context, data []byte, fromExt, toExt string) ([]byte, error) {
 	if !validExt(fromExt) || !validExt(toExt) {
 		return nil, fmt.Errorf("unsupported audio format: %q -> %q", fromExt, toExt)
