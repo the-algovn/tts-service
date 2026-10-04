@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 import re
@@ -20,7 +21,7 @@ class FakeModel:
         self.calls = []
         self.keys = []
 
-    def render(self, text, ref_wav_path, ref_text, key=None):
+    def render(self, text, ref_wav_path, ref_text, key=None, cancel=None):
         self.calls.append((text, ref_wav_path, ref_text))
         self.keys.append(key)
         return np.zeros(4800, dtype=np.float32)
@@ -122,3 +123,33 @@ def test_render_rejects_while_lock_held():
     with eng._lock:
         with pytest.raises(server.Busy):
             eng.render("x", None, None)
+
+
+def test_cancel_hook_raises_only_once_cancelled():
+    eng = object.__new__(server.Engine)
+    eng._cancel = None
+    eng._check_cancel(None, ())
+    eng._cancel = threading.Event()
+    eng._check_cancel(None, ())
+    eng._cancel.set()
+    with pytest.raises(server.Cancelled):
+        eng._check_cancel(None, ())
+
+
+def test_client_disconnect_cancels_render(monkeypatch):
+    started = threading.Event()
+
+    class Blocking(FakeModel):
+        def render(self, text, ref_wav_path, ref_text, key=None, cancel=None):
+            started.set()
+            assert cancel.wait(5)
+            raise server.Cancelled()
+
+    class GoneClient:
+        async def is_disconnected(self):
+            return started.is_set()
+
+    monkeypatch.setattr(server, "_engine", Blocking())
+    monkeypatch.setattr(server, "DISCONNECT_POLL", 0.01)
+    req = server.SynthesizeRequest(text="xin chao", description="giong nu")
+    assert asyncio.run(server.synthesize(req, GoneClient())).status_code == 499

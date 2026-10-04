@@ -11,8 +11,17 @@ GET /healthz -> 200 once the model is resident. The model loads before the
   server accepts connections, so probes get connection-refused until then.
 ```
 
-Unused fields are sent as JSON null. Errors are non-200 with a short body
-(400 for bad requests; 503 only when the model is not loaded, i.e. under VOXCPM_SKIP_LOAD=1). Text is limited to 600 characters.
+Unused fields are sent as JSON null. Errors are non-200 with a short body:
+400 for bad requests, 503 when the model is not loaded or another render
+holds the engine (one render at a time per pod). Text is limited to 600
+characters.
+
+A render stops at the next audio patch once its client disconnects (the
+server answers 499 to nobody), so a request tts-service gave up on does not
+hold the pod for minutes.
+
+Environment: `TORCH_THREADS` (default 8) and `VOXCPM_TIMESTEPS`, the diffusion
+steps per audio patch (default 10; fewer is faster and rougher).
 
 ## Model and licence
 

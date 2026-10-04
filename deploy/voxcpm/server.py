@@ -7,6 +7,7 @@ Contract is fixed by tts-service/internal/backend/voxcpm.go:
   GET /healthz -> 200 once the model is resident. The model loads before the
   server accepts connections, so probes get connection-refused until then.
 """
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -20,7 +21,7 @@ from collections import OrderedDict
 from typing import Optional
 
 import soundfile as sf
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
@@ -28,12 +29,17 @@ log = logging.getLogger("voxcpm.server")
 
 MAX_TEXT = 600
 PROMPT_CACHE_SIZE = 8
+DISCONNECT_POLL = 1.0
 
 _engine = None
 
 
 class Busy(Exception):
     """Raised by render when another inference holds the engine."""
+
+
+class Cancelled(Exception):
+    """Raised inside a render once its client has gone away."""
 
 
 class Engine:
@@ -48,11 +54,21 @@ class Engine:
         # hardware, and bf16 measured ~3x slower than float32 on CPU.
         vm.pick_runtime_dtype = lambda device, configured: "float32"
         torch.set_num_threads(int(os.environ.get("TORCH_THREADS", "8")))
+        self._timesteps = int(os.environ.get("VOXCPM_TIMESTEPS", "10"))
         self._m = VoxCPM.from_pretrained(
             "openbmb/VoxCPM2", load_denoiser=False, optimize=False, device="cpu")
         self.sample_rate = self._m.tts_model.sample_rate
         self._lock = threading.Lock()
         self._prompts = OrderedDict()
+        self._cancel = None
+        # The library's generation loop runs the decoder once per audio patch
+        # and offers no stop hook; a pre-hook there is the earliest point an
+        # abandoned render can stop instead of holding the engine for minutes.
+        self._m.tts_model.feat_decoder.register_forward_pre_hook(self._check_cancel)
+
+    def _check_cancel(self, _module, _args):
+        if self._cancel is not None and self._cancel.is_set():
+            raise Cancelled()
 
     def _prompt(self, ref_wav_path, ref_text, key):
         # build_prompt_cache/_generate_with_prompt_cache are private voxcpm
@@ -68,13 +84,14 @@ class Engine:
             self._prompts.popitem(last=False)
         return p
 
-    def render(self, text, ref_wav_path, ref_text, key=None):
+    def render(self, text, ref_wav_path, ref_text, key=None, cancel=None):
         if not self._lock.acquire(blocking=False):
             raise Busy()
+        self._cancel = cancel
         try:
             prompt = self._prompt(ref_wav_path, ref_text, key) if ref_wav_path else None
             gen = self._m.tts_model._generate_with_prompt_cache(
-                target_text=text, prompt_cache=prompt, inference_timesteps=10,
+                target_text=text, prompt_cache=prompt, inference_timesteps=self._timesteps,
                 cfg_value=2.0, retry_badcase=True, streaming=False)
             try:
                 wav, _, _ = next(gen)
@@ -82,6 +99,7 @@ class Engine:
                 gen.close()
             return wav.squeeze(0).cpu().numpy()
         finally:
+            self._cancel = None
             self._lock.release()
 
 
@@ -112,7 +130,7 @@ def healthz() -> Response:
 
 
 @app.post("/synthesize")
-def synthesize(req: SynthesizeRequest) -> Response:
+async def synthesize(req: SynthesizeRequest, request: Request) -> Response:
     if _engine is None:
         raise HTTPException(503, "model not loaded")
     text = " ".join(req.text.split())
@@ -128,19 +146,28 @@ def synthesize(req: SynthesizeRequest) -> Response:
     if not clone and not req.description:
         raise HTTPException(400, "send a reference or a description")
 
+    cancel = threading.Event()
+    work = asyncio.ensure_future(asyncio.to_thread(_render, req, text, clone, cancel))
+    while not work.done():
+        await asyncio.wait({work}, timeout=DISCONNECT_POLL)
+        if not work.done() and await request.is_disconnected():
+            cancel.set()
     try:
-        audio = _render(req, text, clone)
+        audio = work.result()
     except Busy:
         raise HTTPException(503, "busy") from None
+    except Cancelled:
+        log.info("render cancelled: client went away")
+        return Response(status_code=499)
 
     buf = io.BytesIO()
     sf.write(buf, audio, _engine.sample_rate, format="WAV")
     return Response(content=buf.getvalue(), media_type="audio/wav")
 
 
-def _render(req: SynthesizeRequest, text: str, clone: bool):
+def _render(req: SynthesizeRequest, text: str, clone: bool, cancel: threading.Event):
     if not clone:
-        return _engine.render(f"({req.description}){text}", None, None)
+        return _engine.render(f"({req.description}){text}", None, None, cancel=cancel)
     try:
         ref = base64.b64decode(req.ref_wav_b64, validate=True)
     except (binascii.Error, ValueError) as e:
@@ -153,4 +180,4 @@ def _render(req: SynthesizeRequest, text: str, clone: bool):
     with tempfile.NamedTemporaryFile(suffix=".wav") as f:
         f.write(ref)
         f.flush()
-        return _engine.render(text, f.name, req.ref_text, key)
+        return _engine.render(text, f.name, req.ref_text, key, cancel=cancel)
