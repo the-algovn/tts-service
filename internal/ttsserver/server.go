@@ -22,10 +22,11 @@ import (
 // maxTextChars bounds one utterance. The bound is derived from the default
 // 4MB gRPC message limit, not an arbitrary sizing choice: neither this
 // server nor its callers raise MaxCallRecvMsgSize/MaxCallSendMsgSize, and
-// text transcodes to roughly 1MB of MP3 per minute of speech. 5000 Vietnamese characters (~5 minutes) produced ~4.8MB -- a
-// request this service would have declared legal but could not deliver,
-// after doing all the synthesis work. 2000 characters (~2 minutes, ~1.9MB)
-// stays safely under the limit.
+// text transcodes to roughly 1MB of MP3 per minute of speech. 5000
+// Vietnamese characters (~5 minutes) produced ~4.8MB -- a request this
+// service would have declared legal but could not deliver, after doing all
+// the synthesis work. 2000 characters (~2 minutes, ~1.9MB) stays safely
+// under the limit.
 const maxTextChars = 2000
 
 type Deps struct {

@@ -31,8 +31,9 @@ var version = "dev"
 
 const bucketWait = 30 * time.Second
 
-// openBucket creates the bucket when it is missing. Failing to do so is logged,
-// not fatal: the cache and the voice registry each degrade on their own.
+// openBucket creates the bucket in the background when it is missing, so an
+// unreachable MinIO delays nothing: the cache and the voice registry each
+// degrade on their own, and a blocked startup would trip the liveness probe.
 func openBucket(ctx context.Context, logger *slog.Logger, endpoint, bucket string) (*cache.S3, error) {
 	s, err := cache.NewS3(cache.Config{
 		Endpoint:  endpoint,
@@ -44,11 +45,13 @@ func openBucket(ctx context.Context, logger *slog.Logger, endpoint, bucket strin
 	if err != nil {
 		return nil, err
 	}
-	ectx, cancel := context.WithTimeout(ctx, bucketWait)
-	defer cancel()
-	if err := s.EnsureBucket(ectx); err != nil {
-		logger.ErrorContext(ctx, "bucket unavailable", "bucket", bucket, "err", err)
-	}
+	go func() {
+		ectx, cancel := context.WithTimeout(ctx, bucketWait)
+		defer cancel()
+		if err := s.EnsureBucket(ectx); err != nil {
+			logger.ErrorContext(ctx, "bucket unavailable", "bucket", bucket, "err", err)
+		}
+	}()
 	return s, nil
 }
 
