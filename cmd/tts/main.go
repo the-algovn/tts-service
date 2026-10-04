@@ -29,6 +29,29 @@ import (
 // version is stamped at build time with -ldflags "-X main.version=<sha>".
 var version = "dev"
 
+const bucketWait = 30 * time.Second
+
+// openBucket creates the bucket when it is missing. Failing to do so is logged,
+// not fatal: the cache and the voice registry each degrade on their own.
+func openBucket(ctx context.Context, logger *slog.Logger, endpoint, bucket string) (*cache.S3, error) {
+	s, err := cache.NewS3(cache.Config{
+		Endpoint:  endpoint,
+		AccessKey: config.Get("MINIO_ACCESS_KEY", ""),
+		SecretKey: config.Get("MINIO_SECRET_KEY", ""),
+		Bucket:    bucket,
+		UseSSL:    config.Get("MINIO_USE_SSL", "false") == "true",
+	})
+	if err != nil {
+		return nil, err
+	}
+	ectx, cancel := context.WithTimeout(ctx, bucketWait)
+	defer cancel()
+	if err := s.EnsureBucket(ectx); err != nil {
+		logger.ErrorContext(ctx, "bucket unavailable", "bucket", bucket, "err", err)
+	}
+	return s, nil
+}
+
 func main() {
 	obsCfg, err := obs.ConfigFromEnv("tts-service", version)
 	if err != nil {
@@ -66,13 +89,7 @@ func main() {
 	backends := map[string]backend.Backend{"fake": backend.Fake{}}
 	var store cache.Store
 	if ep := config.Get("MINIO_ENDPOINT", ""); ep != "" {
-		s3, err := cache.NewS3(cache.Config{
-			Endpoint:  ep,
-			AccessKey: config.Get("MINIO_ACCESS_KEY", ""),
-			SecretKey: config.Get("MINIO_SECRET_KEY", ""),
-			Bucket:    config.Get("MINIO_BUCKET", "tts-cache"),
-			UseSSL:    config.Get("MINIO_USE_SSL", "false") == "true",
-		})
+		s3, err := openBucket(ctx, logger, ep, config.Get("MINIO_BUCKET", "tts-cache"))
 		if err != nil {
 			logger.ErrorContext(ctx, "minio setup failed", "err", err)
 			os.Exit(1)
@@ -88,13 +105,7 @@ func main() {
 			logger.ErrorContext(ctx, "VOXCPM_URL needs MINIO_ENDPOINT for the voice registry")
 			os.Exit(1)
 		}
-		vs, err := cache.NewS3(cache.Config{
-			Endpoint:  ep,
-			AccessKey: config.Get("MINIO_ACCESS_KEY", ""),
-			SecretKey: config.Get("MINIO_SECRET_KEY", ""),
-			Bucket:    config.Get("VOICES_BUCKET", "tts-voices"),
-			UseSSL:    config.Get("MINIO_USE_SSL", "false") == "true",
-		})
+		vs, err := openBucket(ctx, logger, ep, config.Get("VOICES_BUCKET", "tts-voices"))
 		if err != nil {
 			logger.ErrorContext(ctx, "voice store setup failed", "err", err)
 			os.Exit(1)

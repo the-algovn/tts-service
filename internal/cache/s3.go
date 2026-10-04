@@ -36,6 +36,24 @@ func NewS3(cfg Config) (*S3, error) {
 	return &S3{c: c, bucket: cfg.Bucket}, nil
 }
 
+// EnsureBucket creates the bucket when it does not exist yet. It returns the
+// object store's error when the bucket can be neither found nor created.
+func (s *S3) EnsureBucket(ctx context.Context) error {
+	ok, err := s.c.BucketExists(ctx, s.bucket)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	err = s.c.MakeBucket(ctx, s.bucket, minio.MakeBucketOptions{})
+	var resp minio.ErrorResponse
+	if errors.As(err, &resp) && (resp.Code == "BucketAlreadyOwnedByYou" || resp.Code == "BucketAlreadyExists") {
+		return nil
+	}
+	return err
+}
+
 // Get treats a missing object as a miss, not an error -- a cold cache is the
 // normal state, not a failure. GetObject itself only fails on malformed
 // bucket/object names; a missing key only surfaces once the object is read,
